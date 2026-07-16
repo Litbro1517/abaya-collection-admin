@@ -1,0 +1,1780 @@
+     1→     1→# Glide-Like Catalog Builder — Architecture Plan
+     2→     2→
+     3→     3→## Table of Contents
+     4→     4→
+     5→     5→1. [Architecture Overview](#1-architecture-overview)
+     6→     6→2. [Prisma Schema — Complete](#2-prisma-schema--complete)
+     7→     7→3. [API Route Structure](#3-api-route-structure)
+     8→     8→4. [Component Hierarchy](#4-component-hierarchy)
+     9→     9→5. [Zustand State Management](#5-zustand-state-management)
+    10→    10→6. [Data Flow Diagrams](#6-data-flow-diagrams)
+    11→    11→7. [Key Implementation Strategies](#7-key-implementation-strategies)
+    12→    12→8. [Migration Path from Current Codebase](#8-migration-path-from-current-codebase)
+    13→    13→
+    14→    14→---
+    15→    15→
+    16→    16→## 1. Architecture Overview
+    17→    17→
+    18→    18→### The Three-Pillar Model
+    19→    19→
+    20→    20→```
+    21→    21→+-----------------------------------------------------------+
+    22→    22→|                    CATALOG BUILDER                         |
+    23→    23→|                                                            |
+    24→    24→|  +-------------+  +-------------+  +--------------------+  |
+    25→    25→|  |   PILLAR 1  |  |   PILLAR 2  |  |     PILLAR 3       |  |
+    26→    26→|  |    DATA     |  |   LAYOUT    |  |     SETTINGS       |  |
+    27→    27→|  |             |  |             |  |                     |  |
+    28→    28→|  | DataSources |  | Collections |  | Language (FR/EN/AR) |  |
+    29→    29→|  | Columns     |  | Components  |  | Admin Access        |  |
+    30→    30→|  | Rows        |  | Mappings    |  | Color Theme         |  |
+    31→    31→|  | Relations   |  | Preview     |  | Publication         |  |
+    32→    32→|  | Arrays      |  |             |  | Sharing             |  |
+    33→    33→|  +-------------+  +-------------+  +--------------------+  |
+    34→    34→|                                                            |
+    35→    35→+----------------------------|-------------------------------+
+    36→    36→                             |
+    37→    37→                    +--------v--------+
+    38→    38→                    |  PUBLIC CATALOG  |
+    39→    39→                    |  (Read-Only)     |
+    40→    40→                    |  Renders from    |
+    41→    41→                    |  Layout + Data   |
+    42→    42→                    +------------------+
+    43→    43→```
+    44→    44→
+    45→    45→### Core Design Principle: Separation of Schema from Storage
+    46→    46→
+    47→    47→The fundamental insight is that **user-defined columns are metadata**, and **row data is a JSON blob keyed by column IDs**. This avoids the need for ALTER TABLE on every column change and makes SQLite viable.
+    48→    48→
+    49→    49→```
+    50→    50→Traditional:  ALTER TABLE products ADD COLUMN color TEXT;
+    51→    51→Our approach:  columns table (metadata) + rows table (JSON data blob)
+    52→    52→```
+    53→    53→
+    54→    54→---
+    55→    55→
+    56→    56→## 2. Prisma Schema — Complete
+    57→    57→
+    58→    58→```prisma
+    59→    59→generator client {
+    60→    60→  provider = "prisma-client-js"
+    61→    61→}
+    62→    62→
+    63→    63→datasource db {
+    64→    64→  provider = "sqlite"
+    65→    65→  url      = env("DATABASE_URL")
+    66→    66→}
+    67→    67→
+    68→    68→// ═══════════════════════════════════════════════════════════════
+    69→    69→// PILLAR 1: DATA — Dynamic Data Sources, Columns, Rows
+    70→    70→// ═══════════════════════════════════════════════════════════════
+    71→    71→
+    72→    72→/// A user-defined table (e.g., "Products", "Colors", "Categories")
+    73→    73→model DataSource {
+    74→    74→  id          String    @id @default(cuid())
+    75→    75→  name        String    @unique          // "Products", "Colors", etc.
+    76→    76→  slug        String    @unique          // URL-safe identifier
+    77→    77→  icon        String    @default("table") // Lucide icon name
+    78→    78→  color       String    @default("#6366f1") // Accent color for UI
+    79→    79→  sortOrder   Int       @default(0)      // Display order in sidebar
+    80→    80→  createdAt   DateTime  @default(now())
+    81→    81→  updatedAt   DateTime  @updatedAt
+    82→    82→
+    83→    83→  // Relations
+    84→    84→  columns     Column[]
+    85→    85→  rows        Row[]
+    86→    86→  sourceOf    Relation[] @relation("SourceTable")   // This table is the source in a relation
+    87→    87→  targetOf    Relation[] @relation("TargetTable")   // This table is the target in a relation
+    88→    88→
+    89→    89→  @@map("data_sources")
+    90→    90→}
+    91→    91→
+    92→    92→/// A column definition within a DataSource — pure metadata
+    93→    93→model Column {
+    94→    94→  id           String     @id @default(cuid())
+    95→    95→  dataSourceId String
+    96→    96→  name         String                       // "Price", "Image URL", etc.
+    97→    97→  slug         String                       // URL-safe: "price", "image_url"
+    98→    98→  type         ColumnType  @default(TEXT)
+    99→    99→  sortOrder    Int        @default(0)       // Display order in table
+   100→   100→  required     Boolean    @default(false)   // Is this column required?
+   101→   101→  visible      Boolean    @default(true)    // Show in table view?
+   102→   102→  defaultValue String?                      // JSON-encoded default value
+   103→   103→
+   104→   104→  // For ARRAY type: which child columns compose this array
+   105→   105→  arrayChildIds String?                     // JSON array of column IDs: ["col_1","col_2","col_3"]
+   106→   106→
+   107→   107→  // For RELATION type: which table/column this links to
+   108→   108→  relationId   String?                      // FK to Relation record (if type = RELATION)
+   109→   109→
+   110→   110→  createdAt    DateTime   @default(now())
+   111→   111→  updatedAt    DateTime   @updatedAt
+   112→   112→
+   113→   113→  dataSource   DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+   114→   114→
+   115→   115→  @@unique([dataSourceId, slug])
+   116→   116→  @@map("columns")
+   117→   117→}
+   118→   118→
+   119→   119→/// Column types — determines how data is stored, validated, and rendered
+   120→   120→enum ColumnType {
+   121→   121→  TEXT          // Short text (single line)
+   122→   122→  LONG_TEXT     // Multi-line text / description
+   123→   123→  NUMBER        // Numeric (int or float)
+   124→   124→  CURRENCY      // Number formatted as price
+   125→   125→  IMAGE         // Single image URL
+   126→   126→  IMAGE_ARRAY   // JSON array of image URLs (standalone, not composed)
+   127→   127→  COLOR         // Color swatch: JSON { name, hex }
+   128→   128→  BOOLEAN       // true/false
+   129→   129→  DATE          // ISO date string
+   130→   130→  URL           // Web URL
+   131→   131→  PHONE         // Phone number
+   132→   132→  EMAIL         // Email address
+   133→   133→  SELECT        // Single select from predefined options
+   134→   134→  MULTI_SELECT  // Multi select from predefined options
+   135→   135→  ARRAY         // Virtual column composed of other columns (arrayChildIds)
+   136→   136→  RELATION      // Links to a row in another DataSource
+   137→   137→}
+   138→   138→
+   139→   139→/// A row of data — stores all cell values in a single JSON object keyed by column ID
+   140→   140→model Row {
+   141→   141→  id           String     @id @default(cuid())
+   142→   142→  dataSourceId String
+   143→   143→  data         String     // JSON: { "col_abc123": "value1", "col_def456": 42, ... }
+   144→   144→  sortOrder    Int        @default(0)
+   145→   145→  createdAt    DateTime   @default(now())
+   146→   146→  updatedAt    DateTime   @updatedAt
+   147→   147→
+   148→   148→  dataSource   DataSource @relation(fields: [dataSourceId], references: [id], onDelete: Cascade)
+   149→   149→
+   150→   150→  @@map("rows")
+   151→   151→}
+   152→   152→
+   153→   153→/// A relation between two DataSources (like a foreign key)
+   154→   154→model Relation {
+   155→   155→  id             String     @id @default(cuid())
+   156→   156→  name           String                       // "Product → Category"
+   157→   157→  sourceColumnId String                       // The column in source table that holds the reference
+   158→   158→  sourceTableId  String                       // The source DataSource
+   159→   159→  targetTableId  String                       // The target DataSource
+   160→   160→  type           RelationType @default(MANY_TO_ONE)
+   161→   161→
+   162→   162→  sourceColumn   Column     @relation(fields: [sourceColumnId], references: [id], onDelete: Cascade)
+   163→   163→  sourceTable    DataSource @relation("SourceTable", fields: [sourceTableId], references: [id], onDelete: Cascade)
+   164→   164→  targetTable    DataSource @relation("TargetTable", fields: [targetTableId], references: [id], onDelete: Cascade)
+   165→   165→
+   166→   166→  @@map("relations")
+   167→   167→}
+   168→   168→
+   169→   169→enum RelationType {
+   170→   170→  MANY_TO_ONE    // Many rows in source → one row in target (e.g., products → category)
+   171→   171→  ONE_TO_MANY    // One row in source → many rows in target (e.g., category → products)
+   172→   172→  MANY_TO_MANY   // Junction (future: via junction table)
+   173→   173→}
+   174→   174→
+   175→   175→/// Select options for SELECT/MULTI_SELECT column types
+   176→   176→model SelectOption {
+   177→   177→  id         String   @id @default(cuid())
+   178→   178→  columnId   String
+   179→   179→  label      String
+   180→   180→  value      String   // Stored value (can differ from label)
+   181→   181→  color      String?  // Hex color for the tag
+   182→   182→  sortOrder  Int      @default(0)
+   183→   183→
+   184→   184→  column     Column   @relation(fields: [columnId], references: [id], onDelete: Cascade)
+   185→   185→
+   186→   186→  @@unique([columnId, value])
+   187→   187→  @@map("select_options")
+   188→   188→}
+   189→   189→
+   190→   190→// ═══════════════════════════════════════════════════════════════
+   191→   191→// PILLAR 2: LAYOUT — Visual Editor Configuration
+   192→   192→// ═══════════════════════════════════════════════════════════════
+   193→   193→
+   194→   194→/// A catalog — the top-level entity that ties data + layout + settings
+   195→   195→model Catalog {
+   196→   196→  id          String    @id @default(cuid())
+   197→   197→  name        String    @default("Mon Catalogue")
+   198→   198→  slug        String    @unique @default(cuid())
+   199→   199→  published   Boolean   @default(false)
+   200→   200→  createdAt   DateTime  @default(now())
+   201→   201→  updatedAt   DateTime  @updatedAt
+   202→   202→
+   203→   203→  // Relations
+   204→   204→  pages       Page[]
+   205→   205→  settings    CatalogSettings?
+   206→   206→  theme       Theme?
+   207→   207→
+   208→   208→  @@map("catalogs")
+   209→   209→}
+   210→   210→
+   211→   211→/// A page within a catalog (e.g., "Home", "All Products", "About")
+   212→   212→model Page {
+   213→   213→  id          String    @id @default(cuid())
+   214→   214→  catalogId   String
+   215→   215→  name        String                       // "Home", "Products", "About"
+   216→   216→  slug        String                       // "home", "products", "about"
+   217→   217→  route       String                       // "/" , "/products", "/about"
+   218→   218→  sortOrder   Int       @default(0)
+   219→   219→  isHome      Boolean   @default(false)    // Landing page?
+   220→   220→  createdAt   DateTime  @default(now())
+   221→   221→  updatedAt   DateTime  @updatedAt
+   222→   222→
+   223→   223→  catalog     Catalog   @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+   224→   224→  sections    Section[]
+   225→   225→
+   226→   226→  @@unique([catalogId, slug])
+   227→   227→  @@map("pages")
+   228→   228→}
+   229→   229→
+   230→   230→/// A section on a page — the fundamental layout unit
+   231→   231→model Section {
+   232→   232→  id         String      @id @default(cuid())
+   233→   233→  pageId     String
+   234→   234→  type       SectionType
+   235→   235→  config     String      @default("{}") // JSON: section-level config (padding, background, etc.)
+   236→   236→  sortOrder  Int         @default(0)
+   237→   237→  visible    Boolean     @default(true)
+   238→   238→  createdAt  DateTime    @default(now())
+   239→   239→  updatedAt  DateTime    @updatedAt
+   240→   240→
+   241→   241→  page       Page        @relation(fields: [pageId], references: [id], onDelete: Cascade)
+   242→   242→  components Component[]
+   243→   243→
+   244→   244→  @@map("sections")
+   245→   245→}
+   246→   246→
+   247→   247→enum SectionType {
+   248→   248→  HERO            // Hero banner with image + text
+   249→   249→  COLLECTION      // Grid/list of items from a DataSource
+   250→   250→  DETAIL_VIEW     // Full product detail (carousel, variants, etc.)
+   251→   251→  RICH_TEXT       // Free text block
+   252→   252→  IMAGE_BANNER    // Full-width image
+   253→   253→  SEPARATOR       // Visual divider
+   254→   254→  CAROUSEL_SECTION // Horizontal scroll of items
+   255→   255→}
+   256→   256→
+   257→   257→/// A component within a section — maps data columns to UI elements
+   258→   258→model Component {
+   259→   259→  id         String    @id @default(cuid())
+   260→   260→  sectionId  String
+   261→   261→  type       ComponentType
+   262→   262→  mappings   String    @default("{}") // JSON: { title: "col_abc", description: "col_def", ... }
+   263→   263→  style      String    @default("{}") // JSON: { fontSize: "lg", borderRadius: "md", ... }
+   264→   264→  sortOrder  Int       @default(0)
+   265→   265→  createdAt  DateTime  @default(now())
+   266→   266→  updatedAt  DateTime  @updatedAt
+   267→   267→
+   268→   268→  section    Section   @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+   269→   269→
+   270→   270→  @@map("components")
+   271→   271→}
+   272→   272→
+   273→   273→enum ComponentType {
+   274→   274→  // Level 1 — Collection level
+   275→   275→  CARD_GRID         // Grid of product cards
+   276→   276→  CARD_LIST         // List of product cards (horizontal)
+   277→   277→  TABLE_VIEW        // Tabular display
+   278→   278→
+   279→   279→  // Level 2 — Card presentation
+   280→   280→  CARD_COVER        // Card with cover image (used within CARD_GRID)
+   281→   281→  CARD_INLINE       // Card with inline image
+   282→   282→
+   283→   283→  // Level 3 — Detail view
+   284→   284→  IMAGE_CAROUSEL    // Carousel of images (from array column)
+   285→   285→  COLOR_SWATCHES    // Grid of color swatches
+   286→   286→  VARIANT_SELECTOR  // Size/variant picker
+   287→   287→  FIELD_DISPLAY     // Single field display (label + value)
+   288→   288→  ACTION_BUTTON     // CTA button (WhatsApp, etc.)
+   289→   289→  RELATED_ITEMS     // Related items from a relation
+   290→   290→
+   291→   291→  // Misc
+   292→   292→  SEARCH_BAR        // Search input
+   293→   293→  FILTER_BAR        // Category/filter chips
+   294→   294→  BREADCRUMB        // Navigation breadcrumb
+   295→   295→}
+   296→   296→
+   297→   297→// ═══════════════════════════════════════════════════════════════
+   298→   298→// PILLAR 3: SETTINGS
+   299→   299→// ═══════════════════════════════════════════════════════════════
+   300→   300→
+   301→   301→/// Catalog-level settings (one-to-one with Catalog)
+   302→   302→model CatalogSettings {
+   303→   303→  id                String   @id @default(cuid())
+   304→   304→  catalogId         String   @unique
+   305→   305→
+   306→   306→  // Language
+   307→   307→  language          String   @default("fr")  // "fr", "en", "ar"
+   308→   308→  rtl               Boolean  @default(false) // Auto-set if language is "ar"
+   309→   309→
+   310→   310→  // Admin access
+   311→   311→  adminPassword     String?                    // Hashed password
+   312→   312→  sessionSecret     String?                    // For JWT signing
+   313→   313→
+   314→   314→  // Publication
+   315→   315→  isPublished       Boolean  @default(false)
+   316→   316→  publishedAt       DateTime?
+   317→   317→  customDomain      String?
+   318→   318→
+   319→   319→  // Conversion links
+   320→   320→  whatsappNumber    String?
+   321→   321→  messengerLink     String?
+   322→   322→  instagramLink     String?
+   323→   323→  emailContact      String?
+   324→   324→
+   325→   325→  // Features
+   326→   326→  imageZoom         Boolean  @default(true)
+   327→   327→  allowProductAdd   Boolean  @default(false)  // Can visitors suggest products?
+   328→   328→  showSearch        Boolean  @default(true)
+   329→   329→  showFilter        Boolean  @default(true)
+   330→   330→
+   331→   331→  // Layout
+   332→   332→  itemsPerRow       Int      @default(2)      // Mobile: 2, Desktop: configurable
+   333→   333→  cardStyle         String   @default("cover") // "cover" | "inline" | "minimal"
+   334→   334→  detailLayout      String   @default("sheet") // "sheet" | "page" | "modal"
+   335→   335→
+   336→   336→  // Sharing
+   337→   337→  shareTitle        String?
+   338→   338→  shareDescription  String?
+   339→   339→  shareImage        String?                    // OG image URL
+   340→   340→
+   341→   341→  createdAt         DateTime @default(now())
+   342→   342→  updatedAt         DateTime @updatedAt
+   343→   343→
+   344→   344→  catalog           Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+   345→   345→
+   346→   346→  @@map("catalog_settings")
+   347→   347→}
+   348→   348→
+   349→   349→/// Theme customization
+   350→   350→model Theme {
+   351→   351→  id              String   @id @default(cuid())
+   352→   352→  catalogId       String   @unique
+   353→   353→
+   354→   354→  primaryColor    String   @default("#C9A84C")    // Gold
+   355→   355→  secondaryColor  String   @default("#1a1a1a")
+   356→   356→  accentColor     String   @default("#C9A84C")
+   357→   357→  backgroundColor String   @default("#ffffff")
+   358→   358→  cardBackground  String   @default("#ffffff")
+   359→   359→  textColor       String   @default("#1a1a1a")
+   360→   360→  mutedColor      String   @default("#6b7280")
+   361→   361→  borderRadius    String   @default("lg")         // "none" | "sm" | "md" | "lg" | "xl" | "full"
+   362→   362→  fontFamily      String   @default("Playfair Display")
+   363→   363→  bodyFont        String   @default("Inter")
+   364→   364→
+   365→   365→  createdAt       DateTime @default(now())
+   366→   366→  updatedAt       DateTime @updatedAt
+   367→   367→
+   368→   368→  catalog         Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+   369→   369→
+   370→   370→  @@map("themes")
+   371→   371→}
+   372→   372→
+   373→   373→/// Admin sessions
+   374→   374→model AdminSession {
+   375→   375→  id        String   @id @default(cuid())
+   376→   376→  token     String   @unique
+   377→   377→  createdAt DateTime @default(now())
+   378→   378→  expiresAt DateTime
+   379→   379→}
+   380→   380→
+   381→   381→/// Key-value settings (for global app config)
+   382→   382→model Settings {
+   383→   383→  key   String @id
+   384→   384→  value String @default("")
+   385→   385→}
+   386→   386→```
+   387→   387→
+   388→   388→### Schema Design Rationale
+   389→   389→
+   390→   390→| Decision | Why |
+   391→   391→|----------|-----|
+   392→   392→| **Row.data is JSON string** | SQLite doesn't support JSON columns natively in Prisma, but `String` works fine with `JSON.parse/stringify`. Columns are metadata; rows are a flat JSON blob keyed by `columnId`. |
+   393→   393→| **Column.arrayChildIds is JSON** | An ARRAY column groups multiple real columns. The `arrayChildIds` field stores `["col_a","col_b","col_c"]` so we know which sub-columns to compose. |
+   394→   394→| **Relation is a first-class entity** | Instead of burying FK info inside column config, Relations are their own table. This makes validation, resolution, and future many-to-many easier. |
+   395→   395→| **Component.mappings is JSON** | Each component type has different mapping needs. `CARD_GRID` maps `{ title, description, coverImage }`, while `IMAGE_CAROUSEL` maps `{ images }`. Storing as flexible JSON avoids a table per component type. |
+   396→   396→| **Catalog → Page → Section → Component** | Four-level nesting mirrors how visual editors work. This is the same pattern Glide uses: App → Screen → Container → Element. |
+   397→   397→| **CatalogSettings is 1:1** | Separate model avoids bloating the Catalog model. One-to-one via `@unique` on `catalogId`. |
+   398→   398→| **Theme is separate** | Theme values change independently and may be swapped/shared in future. |
+   399→   399→
+   400→   400→---
+   401→   401→
+   402→   402→## 3. API Route Structure
+   403→   403→
+   404→   404→```
+   405→   405→src/app/api/
+   406→   406→├── auth/
+   407→   407→│   ├── route.ts              # POST login, GET session check, DELETE logout
+   408→   408→│
+   409→   409→├── data-sources/
+   410→   410→│   ├── route.ts              # GET (list), POST (create)
+   411→   411→│   ├── [id]/
+   412→   412→│   │   ├── route.ts          # GET, PATCH, DELETE a DataSource
+   413→   413→│   │   ├── columns/
+   414→   414→│   │   │   ├── route.ts      # GET (list columns), POST (add column)
+   415→   415→│   │   │   ├── [columnId]/
+   416→   416→│   │   │   │   └── route.ts  # PATCH, DELETE a column
+   417→   417→│   │   ├── rows/
+   418→   418→│   │   │   ├── route.ts      # GET (list rows, paginated), POST (add row)
+   419→   419→│   │   │   ├── [rowId]/
+   420→   420→│   │   │   │   └── route.ts  # GET, PATCH, DELETE a row
+   421→   421→│   │   ├── import/
+   422→   422→│   │   │   └── route.ts      # POST CSV import
+   423→   423→│   │   ├── export/
+   424→   424→│   │   │   └── route.ts      # GET CSV export
+   425→   425→│   │   └── relations/
+   426→   426→│   │       ├── route.ts      # GET, POST relations for this source
+   427→   427→│   │       ├── [relationId]/
+   428→   428→│   │       │   └── route.ts  # PATCH, DELETE a relation
+   429→   429→│
+   430→   430→├── catalogs/
+   431→   431→│   ├── route.ts              # GET (list), POST (create)
+   432→   432→│   ├── [catalogId]/
+   433→   433→│   │   ├── route.ts          # GET, PATCH, DELETE
+   434→   434→│   │   ├── pages/
+   435→   435→│   │   │   ├── route.ts      # GET, POST
+   436→   436→│   │   │   ├── [pageId]/
+   437→   437→│   │   │   │   ├── route.ts  # GET, PATCH, DELETE
+   438→   438→│   │   │   │   ├── sections/
+   439→   439→│   │   │   │   │   ├── route.ts       # GET, POST
+   440→   440→│   │   │   │   │   ├── [sectionId]/
+   441→   441→│   │   │   │   │   │   ├── route.ts   # GET, PATCH, DELETE
+   442→   442→│   │   │   │   │   │   ├── components/
+   443→   443→│   │   │   │   │   │   │   ├── route.ts       # GET, POST
+   444→   444→│   │   │   │   │   │   │   ├── [componentId]/
+   445→   445→│   │   │   │   │   │   │   │   └── route.ts   # GET, PATCH, DELETE
+   446→   446→│   │   ├── settings/
+   447→   447→│   │   │   └── route.ts      # GET, PATCH catalog settings
+   448→   448→│   │   ├── theme/
+   449→   449→│   │   │   └── route.ts      # GET, PATCH theme
+   450→   450→│   │   ├── publish/
+   451→   451→│   │   │   └── route.ts      # POST publish, DELETE unpublish
+   452→   452→│   │   ├── share/
+   453→   453→│   │   │   └── route.ts      # GET share link/QR data
+   454→   454→│
+   455→   455→├── upload/
+   456→   456→│   └── route.ts              # POST image upload (multipart)
+   457→   457→│
+   458→   458→├── public/
+   459→   459→│   └── [catalogSlug]/
+   460→   460→│       ├── route.ts          # GET full catalog data for public rendering
+   461→   461→│       ├── data/
+   462→   462→│       │   └── [dataSourceSlug]/
+   463→   463→│       │       └── route.ts  # GET rows for a data source (public, paginated)
+   464→   464→│       └── product/
+   465→   465→│           └── [rowId]/
+   466→   466→│               └── route.ts  # GET single row with resolved relations
+   467→   467→```
+   468→   468→
+   469→   469→### Key API Endpoints Detail
+   470→   470→
+   471→   471→#### CSV Import (`POST /api/data-sources/[id]/import`)
+   472→   472→
+   473→   473→```
+   474→   474→Input:  FormData with CSV file
+   475→   475→Process:
+   476→   476→  1. Parse CSV headers → create Column records (auto-detect type: TEXT/NUMBER/IMAGE)
+   477→   477→  2. Parse CSV rows → create Row records with data JSON keyed by column IDs
+   478→   478→  3. Return: { imported: N, columns: [...], errors: [...] }
+   479→   479→```
+   480→   480→
+   481→   481→#### Public Catalog Data (`GET /api/public/[catalogSlug]`)
+   482→   482→
+   483→   483→```
+   484→   484→Returns:
+   485→   485→{
+   486→   486→  catalog: { name, slug, theme, settings },
+   487→   487→  pages: [
+   488→   488→    {
+   489→   489→      name, slug, route,
+   490→   490→      sections: [
+   491→   491→        {
+   492→   492→          type, config,
+   493→   493→          components: [
+   494→   494→            { type, mappings, style }
+   495→   495→          ]
+   496→   496→        }
+   497→   497→      ]
+   498→   498→    }
+   499→   499→  ],
+   500→   500→  dataSources: {  // only the ones referenced by components
+   501→   501→    [slug]: {
+   502→   502→      columns: [...],
+   503→   503→      rows: [...]  // first page
+   504→   504→    }
+   505→   505→  }
+   506→   506→}
+   507→   507→```
+   508→   508→
+   509→   509→---
+   510→   510→
+   511→   511→## 4. Component Hierarchy
+   512→   512→
+   513→   513→### 4.1 Admin Builder — Three-Pillar Layout
+   514→   514→
+   515→   515→```
+   516→   516→<BuilderLayout>
+   517→   517→├── <BuilderSidebar>              // Left: pillar navigation
+   518→   518→│   ├── <PillarNav>
+   519→   519→│   │   ├── <NavItem icon="database" label="Data" />
+   520→   520→│   │   ├── <NavItem icon="layout"   label="Layout" />
+   521→   521→│   │   └── <NavItem icon="settings" label="Settings" />
+   522→   522→│   └── <DataSourceList />        // Quick access to tables (below nav)
+   523→   523→│
+   524→   524→├── <BuilderMain>                 // Center: active pillar content
+   525→   525→│   │
+   526→   526→│   ├── DATA PILLAR:
+   527→   527→│   │   ├── <DataSourceManager>   // List/manage all data sources
+   528→   528→│   │   │   ├── <DataSourceCard>  // Summary card per table
+   529→   529→│   │   │   └── <ImportCSVModal>  // CSV import wizard
+   530→   530→│   │   │
+   531→   531→│   │   └── <DataSourceEditor>    // Single table editor
+   532→   532→│   │       ├── <ColumnHeader>    // Column headers with type badges
+   533→   533→│   │       │   ├── <ColumnNameCell>
+   534→   534→│   │       │   ├── <ColumnTypeCell>
+   535→   535→│   │       │   └── <ColumnActionsMenu>  // Edit, delete, add relation/array
+   536→   536→│   │       ├── <TableGrid>       // Inline-editable data grid
+   537→   537→│   │       │   ├── <TableHeader>
+   538→   538→│   │       │   └── <TableRow>
+   539→   539→│   │       │       └── <TableCell>  // Editable cell (renders per column type)
+   540→   540→│   │       ├── <AddColumnDropdown>   // "+" button to add column
+   541→   541→│   │       └── <RelationPanel>       // Manage relations for this table
+   542→   542→│   │           ├── <RelationCard>
+   543→   543→│   │           └── <CreateRelationDialog>
+   544→   544→│   │
+   545→   545→│   ├── LAYOUT PILLAR:
+   546→   546→│   │   ├── <PageManager>         // Page list + add page
+   547→   547→│   │   │   └── <PageCard>
+   548→   548→│   │   │
+   549→   549→│   │   └── <PageEditor>          // Visual editor for a page
+   550→   550→│   │       ├── <SectionList>     // Vertical list of sections
+   551→   551→│   │       │   └── <SectionBlock>
+   552→   552→│   │       │       ├── <SectionConfigBar>  // Section-level settings
+   553→   553→│   │       │       └── <ComponentList>
+   554→   554→│   │       │           └── <ComponentBlock>
+   555→   555→│   │       │               ├── <ComponentConfig>  // Column mapping dropdowns
+   556→   556→│   │       │               └── <ComponentPreview> // Mini preview
+   557→   557→│   │       └── <AddSectionMenu>   // Add section type
+   558→   558→│   │
+   559→   559→│   └── SETTINGS PILLAR:
+   560→   560→│       ├── <LanguageSettings>
+   561→   561→│       ├── <AdminAccessSettings>
+   562→   562→│       ├── <ThemeEditor>
+   563→   563→│       │   ├── <ColorPicker>      // For each theme color
+   564→   564→│       │   ├── <FontSelector>
+   565→   565→│       │   └── <BorderRadiusSelector>
+   566→   566→│       ├── <PublicationControls>
+   567→   567→│       ├── <SharingSettings>
+   568→   568→│       └── <ConversionLinks>
+   569→   569→│
+   570→   570→└── <BuilderPreview>               // Right: live preview pane (collapsible)
+   571→   571→    ├── <PreviewFrame>             // iframe or inline renderer
+   572→   572→    └── <PreviewToolbar>           // Desktop/tablet/mobile toggle
+   573→   573→```
+   574→   574→
+   575→   575→### 4.2 Public Catalog Renderer
+   576→   576→
+   577→   577→```
+   578→   578→<CatalogRenderer>
+   579→   579→├── <CatalogProvider>              // Provides catalog config + theme context
+   580→   580→│   ├── <ThemeProvider>            // CSS variables from Theme model
+   581→   581→│   └── <LanguageProvider>         // i18n context
+   582→   582→│
+   583→   583→├── <CatalogHeader>                // Catalog name, search, navigation
+   584→   584→│
+   585→   585→├── <PageRenderer>                 // Renders a Page by iterating Sections
+   586→   586→│   └── <SectionRenderer>         // Switch on SectionType
+   587→   587→│       ├── <HeroSection>
+   588→   588→│       ├── <CollectionSection>    // THE MAIN ONE
+   589→   589→│       │   ├── <CollectionQuery>  // Fetches + filters rows
+   590→   590→│       │   ├── <CardGrid>         // Maps rows → cards
+   591→   591→│       │   │   └── <ProductCard>  // Renders one row using mappings
+   592→   592→│       │   │       ├── <CardCover>    // Cover image from mapped column
+   593→   593→│       │   │       ├── <CardTitle>    // Title from mapped column
+   594→   594→│       │   │       └── <CardDesc>     // Description from mapped column
+   595→   595→│       │   └── <FilterBar>       // Category chips, sort
+   596→   596→│       │
+   597→   597→│       ├── <DetailSection>        // Full detail view
+   598→   598→│       │   ├── <ImageCarousel>    // From array column mapping
+   599→   599→│       │   ├── <FieldDisplay>     // Key-value pairs
+   600→   600→│       │   ├── <ColorSwatches>   // Color variant display
+   601→   601→│       │   ├── <VariantSelector>  // Size/model picker
+   602→   602→│       │   └── <ActionButtons>    // WhatsApp, Messenger
+   603→   603→│       │
+   604→   604→│       ├── <RichTextSection>
+   605→   605→│       ├── <ImageBannerSection>
+   606→   606→│       └── <SeparatorSection>
+   607→   607→│
+   608→   608→└── <CatalogFooter>
+   609→   609→```
+   610→   610→
+   611→   611→### 4.3 Three-Level Layout Configuration Components
+   612→   612→
+   613→   613→These are the key UI components for the Layout pillar:
+   614→   614→
+   615→   615→```
+   616→   616→Level 1: Collection Config
+   617→   617→┌──────────────────────────────────────────────────┐
+   618→   618→│  COLLECTION: "Products"                          │
+   619→   619→│                                                  │
+   620→   620→│  Data Source:  [Products  ▼]  ← dropdown         │
+   621→   621→│  Display as:   [Card Grid  ▼]                    │
+   622→   622→│                                                  │
+   623→   623→│  Column Mappings:                                │
+   624→   624→│    Title:       [nomProduit  ▼]  ← column pick   │
+   625→   625→│    Subtitle:    [categorie   ▼]                   │
+   626→   626→│    Description: [description ▼]                   │
+   627→   627→│    Cover Image: [imagePrincipale ▼]               │
+   628→   628→│    Price:       [prixVente   ▼]                   │
+   629→   629→│                                                  │
+   630→   630→│  Filter by:     [categorie   ▼]  ← column pick   │
+   631→   631→│  Sort by:       [nOrdre      ▼]  ← column pick   │
+   632→   632→└──────────────────────────────────────────────────┘
+   633→   633→
+   634→   634→Level 2: Cover Selection
+   635→   635→┌──────────────────────────────────────────────────┐
+   636→   636→│  COVER IMAGE CONFIG                              │
+   637→   637→│                                                  │
+   638→   638→│  Cover column: [imagePrincipale ▼]  ← single col │
+   639→   639→│  Fallback:     [imagesCarousel[0] ▼]             │
+   640→   640→│  Aspect ratio: [3:4 ▼]                           │
+   641→   641→│  Border radius: [lg ▼]                           │
+   642→   642→└──────────────────────────────────────────────────┘
+   643→   643→
+   644→   644→Level 3: Carousel/Detail
+   645→   645→┌──────────────────────────────────────────────────┐
+   646→   646→│  DETAIL VIEW CONFIG                              │
+   647→   647→│                                                  │
+   648→   648→│  Image carousel: [imagesCarousel ▼] ← array col  │
+   649→   649→│  Color variants:  [couleurs      ▼]              │
+   650→   650→│  Size variants:   [tailles       ▼]              │
+   651→   651→│  Extra fields:                                    │
+   652→   652→│    + [Add Field]                                  │
+   653→   653→│      Label: "Prix"  Column: [prixVente ▼]        │
+   654→   654→│      Label: "Stock" Column: [stock    ▼]         │
+   655→   655→│                                                  │
+   656→   656→│  Action button:                                  │
+   657→   657→│    Channel: [WhatsApp ▼]                         │
+   658→   658→│    Phone:   [whatsappNumber from settings]        │
+   659→   659→└──────────────────────────────────────────────────┘
+   660→   660→```
+   661→   661→
+   662→   662→---
+   663→   663→
+   664→   664→## 5. Zustand State Management
+   665→   665→
+   666→   666→### 5.1 Store Architecture — Slice Pattern
+   667→   667→
+   668→   668→```
+   669→   669→src/lib/stores/
+   670→   670→├── builder-store.ts      // Main builder state (active pillar, active catalog)
+   671→   671→├── data-store.ts         // DataSources, columns, rows cache
+   672→   672→├── layout-store.ts       // Pages, sections, components
+   673→   673→├── settings-store.ts     // Catalog settings, theme
+   674→   674→├── catalog-store.ts      // Public catalog rendering state
+   675→   675→└── index.ts              // Re-exports + combined selectors
+   676→   676→```
+   677→   677→
+   678→   678→### 5.2 Builder Store (Core Navigation)
+   679→   679→
+   680→   680→```typescript
+   681→   681→// src/lib/stores/builder-store.ts
+   682→   682→import { create } from 'zustand';
+   683→   683→
+   684→   684→type Pillar = 'data' | 'layout' | 'settings';
+   685→   685→
+   686→   686→interface BuilderState {
+   687→   687→  // Which pillar is active
+   688→   688→  activePillar: Pillar;
+   689→   689→  setActivePillar: (pillar: Pillar) => void;
+   690→   690→
+   691→   691→  // Which catalog are we editing
+   692→   692→  activeCatalogId: string | null;
+   693→   693→  setActiveCatalogId: (id: string) => void;
+   694→   694→
+   695→   695→  // Which data source is being edited (within Data pillar)
+   696→   696→  activeDataSourceId: string | null;
+   697→   697→  setActiveDataSourceId: (id: string | null) => void;
+   698→   698→
+   699→   699→  // Which page is being edited (within Layout pillar)
+   700→   700→  activePageId: string | null;
+   701→   701→  setActivePageId: (id: string | null) => void;
+   702→   702→
+   703→   703→  // Preview panel
+   704→   704→  showPreview: boolean;
+   705→   705→  setShowPreview: (v: boolean) => void;
+   706→   706→  previewDevice: 'desktop' | 'tablet' | 'mobile';
+   707→   707→  setPreviewDevice: (d: 'desktop' | 'tablet' | 'mobile') => void;
+   708→   708→
+   709→   709→  // Global loading
+   710→   710→  loading: boolean;
+   711→   711→  setLoading: (v: boolean) => void;
+   712→   712→}
+   713→   713→```
+   714→   714→
+   715→   715→### 5.3 Data Store (Pillar 1)
+   716→   716→
+   717→   717→```typescript
+   718→   718→// src/lib/stores/data-store.ts
+   719→   719→interface DataState {
+   720→   720→  // All data sources for the active catalog
+   721→   721→  dataSources: DataSource[];
+   722→   722→  setDataSources: (ds: DataSource[]) => void;
+   723→   723→
+   724→   724→  // Columns for the active data source
+   725→   725→  columns: Column[];
+   726→   726→  setColumns: (cols: Column[]) => void;
+   727→   727→
+   728→   728→  // Rows for the active data source (paginated)
+   729→   729→  rows: Row[];
+   730→   730→  setRows: (rows: Row[]) => void;
+   731→   731→  totalRows: number;
+   732→   732→  setTotalRows: (n: number) => void;
+   733→   733→  rowPage: number;
+   734→   734→  setRowPage: (n: number) => void;
+   735→   735→
+   736→   736→  // Relations for the active data source
+   737→   737→  relations: Relation[];
+   738→   738→  setRelations: (rels: Relation[]) => void;
+   739→   739→
+   740→   740→  // Optimistic updates
+   741→   741→  upsertRow: (row: Row) => void;          // Update or insert in local cache
+   742→   742→  removeRow: (rowId: string) => void;
+   743→   743→  upsertColumn: (col: Column) => void;
+   744→   744→  removeColumn: (colId: string) => void;
+   745→   745→
+   746→   746→  // Dirty tracking for inline edits
+   747→   747→  dirtyCells: Map<string, string>;  // `${rowId}:${colId}` → new value
+   748→   748→  markDirty: (rowId: string, colId: string, value: string) => void;
+   749→   749→  flushDirty: () => Promise<void>;   // Batch save all dirty cells
+   750→   750→}
+   751→   751→```
+   752→   752→
+   753→   753→### 5.4 Layout Store (Pillar 2)
+   754→   754→
+   755→   755→```typescript
+   756→   756→// src/lib/stores/layout-store.ts
+   757→   757→interface LayoutState {
+   758→   758→  // Pages for the active catalog
+   759→   759→  pages: Page[];
+   760→   760→  setPages: (pages: Page[]) => void;
+   761→   761→
+   762→   762→  // Sections for the active page
+   763→   763→  sections: Section[];
+   764→   764→  setSections: (sections: Section[]) => void;
+   765→   765→
+   766→   766→  // Components for a specific section
+   767→   767→  componentsBySection: Record<string, Component[]>;
+   768→   768→  setComponentsForSection: (sectionId: string, components: Component[]) => void;
+   769→   769→
+   770→   770→  // Active editing target
+   771→   771→  activeSectionId: string | null;
+   772→   772→  setActiveSectionId: (id: string | null) => void;
+   773→   773→  activeComponentId: string | null;
+   774→   774→  setActiveComponentId: (id: string | null) => void;
+   775→   775→
+   776→   776→  // Column mapping helpers
+   777→   777→  getAvailableColumns: (dataSourceId: string) => Column[];
+   778→   778→  getArrayColumns: (dataSourceId: string) => Column[];  // Only ARRAY type
+   779→   779→  getRelationColumns: (dataSourceId: string) => Column[];  // Only RELATION type
+   780→   780→}
+   781→   781→```
+   782→   782→
+   783→   783→### 5.5 Settings Store (Pillar 3)
+   784→   784→
+   785→   785→```typescript
+   786→   786→// src/lib/stores/settings-store.ts
+   787→   787→interface SettingsState {
+   788→   788→  settings: CatalogSettings | null;
+   789→   789→  setSettings: (s: CatalogSettings) => void;
+   790→   790→  updateSetting: <K extends keyof CatalogSettings>(key: K, value: CatalogSettings[K]) => void;
+   791→   791→
+   792→   792→  theme: Theme | null;
+   793→   793→  setTheme: (t: Theme) => void;
+   794→   794→  updateThemeColor: (key: keyof Theme, value: string) => void;
+   795→   795→
+   796→   796→  // Auth
+   797→   797→  isAdmin: boolean;
+   798→   798→  setIsAdmin: (v: boolean) => void;
+   799→   799→}
+   800→   800→```
+   801→   801→
+   802→   802→### 5.6 Public Catalog Store
+   803→   803→
+   804→   804→```typescript
+   805→   805→// src/lib/stores/catalog-store.ts
+   806→   806→interface CatalogState {
+   807→   807→  // Full catalog data loaded from /api/public/[slug]
+   808→   808→  catalog: CatalogConfig | null;
+   809→   809→  setCatalog: (c: CatalogConfig) => void;
+   810→   810→
+   811→   811→  // Current page
+   812→   812→  currentPageSlug: string;
+   813→   813→  setCurrentPageSlug: (slug: string) => void;
+   814→   814→
+   815→   815→  // Data for the active collection (fetched lazily)
+   816→   816→  collectionData: Record<string, Row[]>;  // dataSourceSlug → rows
+   817→   817→  loadCollectionData: (dataSourceSlug: string, page?: number) => Promise<void>;
+   818→   818→
+   819→   819→  // Selected row for detail view
+   820→   820→  selectedRowId: string | null;
+   821→   821→  setSelectedRowId: (id: string | null) => void;
+   822→   822→  showDetail: boolean;
+   823→   823→  setShowDetail: (v: boolean) => void;
+   824→   824→
+   825→   825→  // Resolved detail data (with relations expanded)
+   826→   826→  detailData: Record<string, unknown> | null;
+   827→   827→
+   828→   828→  // Search & filter
+   829→   829→  searchQuery: string;
+   830→   830→  setSearchQuery: (q: string) => void;
+   831→   831→  activeFilter: string | null;
+   832→   832→  setActiveFilter: (f: string | null) => void;
+   833→   833→}
+   834→   834→```
+   835→   835→
+   836→   836→---
+   837→   837→
+   838→   838→## 6. Data Flow Diagrams
+   839→   839→
+   840→   840→### 6.1 CSV Import Flow
+   841→   841→
+   842→   842→```
+   843→   843→User drops CSV file
+   844→   844→        │
+   845→   845→        ▼
+   846→   846→[Frontend: ImportCSVModal]
+   847→   847→        │  POST /api/data-sources/[id]/import
+   848→   848→        │  FormData { file }
+   849→   849→        ▼
+   850→   850→[API: import/route.ts]
+   851→   851→        │
+   852→   852→        ├── 1. Read CSV with papaparse
+   853→   853→        │      Parse headers → detect types
+   854→   854→        │        - If header contains "image"/"photo"/"img" → IMAGE
+   855→   855→        │        - If header contains "price"/"prix"/"cost"  → CURRENCY
+   856→   856→        │        - If all values are numeric                  → NUMBER
+   857→   857→        │        - Otherwise                                  → TEXT
+   858→   858→        │
+   859→   859→        ├── 2. Create DataSource (if new) or use existing
+   860→   860→        │
+   861→   861→        ├── 3. Create Column records
+   862→   862→        │      for each CSV header:
+   863→   863→        │        db.column.create({ name, slug, type, dataSourceId })
+   864→   864→        │
+   865→   865→        ├── 4. Create Row records
+   866→   866→        │      for each CSV row:
+   867→   867→        │        const data = {};
+   868→   868→        │        for each header/column:
+   869→   869→        │          data[column.id] = csvRow[header];
+   870→   870→        │        db.row.create({ dataSourceId, data: JSON.stringify(data) })
+   871→   871→        │
+   872→   872→        └── 5. Return { imported: N, columns: [...], skipped: M }
+   873→   873→                │
+   874→   874→                ▼
+   875→   875→[Frontend: Update data-store]
+   876→   876→        │  setColumns(newColumns)
+   877→   877→        │  setRows(newRows)
+   878→   878→        ▼
+   879→   879→[TableGrid re-renders]
+   880→   880→```
+   881→   881→
+   882→   882→### 6.2 Layout Configuration Flow
+   883→   883→
+   884→   884→```
+   885→   885→User clicks "Layout" pillar
+   886→   886→        │
+   887→   887→        ▼
+   888→   888→[BuilderMain shows PageManager]
+   889→   889→        │
+   890→   890→        User clicks a Page → setActivePageId(pageId)
+   891→   891→        │
+   892→   892→        ▼
+   893→   893→[PageEditor loads]
+   894→   894→        │  GET /api/catalogs/[id]/pages/[pageId]
+   895→   895→        │  Returns: { sections: [...], components: [...] }
+   896→   896→        ▼
+   897→   897→[SectionList renders sections]
+   898→   898→        │
+   899→   899→        User clicks a Collection section
+   900→   900→        │
+   901→   901→        ▼
+   902→   902→[ComponentConfig panel opens]
+   903→   903→        │
+   904→   904→        ├── Data Source dropdown → lists all DataSources
+   905→   905→        │   User selects "Products"
+   906→   906→        │   → Component.mappings.dataSourceId = "ds_products"
+   907→   907→        │
+   908→   908→        ├── Column Mapping dropdowns → lists columns from selected DataSource
+   909→   909→        │   "Title" → [nomProduit ▼]
+   910→   910→        │   "Description" → [description ▼]
+   911→   911→        │   "Cover Image" → [imagePrincipale ▼]
+   912→   912→        │   "Price" → [prixVente ▼]
+   913→   913→        │
+   914→   914→        └── Auto-save: PATCH /api/catalogs/[id]/pages/[pid]/sections/[sid]/components/[cid]
+   915→   915→                { mappings: { dataSourceId, title: "col_abc", ... } }
+   916→   916→                │
+   917→   917→                ▼
+   918→   918→[Preview pane updates in real-time]
+   919→   919→        │  Reads component.mappings
+   920→   920→        │  Fetches sample rows from DataSource
+   921→   921→        │  Renders <ProductCard> with mapped columns
+   922→   922→        ▼
+   923→   923→```
+   924→   924→
+   925→   925→### 6.3 Public Catalog Rendering Flow
+   926→   926→
+   927→   927→```
+   928→   928→Visitor opens /c/[catalogSlug]
+   929→   929→        │
+   930→   930→        ▼
+   931→   931→[Server Component: CatalogPage]
+   932→   932→        │  GET /api/public/[catalogSlug]
+   933→   933→        │  Returns full catalog config
+   934→   934→        ▼
+   935→   935→[CatalogProvider initializes catalog-store]
+   936→   936→        │
+   937→   937→        ├── Sets theme as CSS variables
+   938→   938→        │     document.documentElement.style.setProperty('--primary', theme.primaryColor)
+   939→   939→        │
+   940→   940→        ├── Sets language context
+   941→   941→        │     if (settings.language === 'ar') document.dir = 'rtl'
+   942→   942→        │
+   943→   943→        └── Renders <PageRenderer>
+   944→   944→                │
+   945→   945→                ▼
+   946→   946→[PageRenderer iterates sections]
+   947→   947→        │
+   948→   948→        For each section:
+   949→   949→        │
+   950→   950→        ├── HERO → <HeroSection config={section.config} />
+   951→   951→        │
+   952→   952→        ├── COLLECTION → <CollectionSection>
+   953→   953→        │     │
+   954→   954→        │     ├── Reads component.mappings to know:
+   955→   955→        │     │   - dataSourceId → which table to query
+   956→   956→        │     │   - title → which column is the title
+   957→   957→        │     │   - coverImage → which column is the image
+   958→   958→        │     │   - price → which column is the price
+   959→   959→        │     │
+   960→   960→        │     ├── Fetches rows: GET /api/public/[slug]/data/[dataSourceSlug]
+   961→   961→        │     │
+   962→   962→        │     └── Renders <CardGrid>
+   963→   963→        │           For each row:
+   964→   964→        │             <ProductCard
+   965→   965→        │               title={row.data[mappings.title]}
+   966→   966→        │               image={row.data[mappings.coverImage]}
+   967→   967→        │               price={row.data[mappings.price]}
+   968→   968→        │               onClick → setSelectedRowId(row.id)
+   969→   969→        │             />
+   970→   970→        │
+   971→   971→        └── DETAIL → <DetailSection>
+   972→   972→              │
+   973→   973→              │  When selectedRowId is set:
+   974→   974→              │
+   975→   975→              ├── GET /api/public/[slug]/product/[rowId]
+   976→   976→              │   Returns row data with relations resolved:
+   977→   977→              │   {
+   978→   978→              │     ...row.data,
+   979→   979→              │     _relations: {
+   980→   980→              │       "col_category": { name: "Abayas", ... },  // resolved
+   981→   981→              │     }
+   982→   982→              │   }
+   983→   983→              │
+   984→   984→              ├── Renders <ImageCarousel>
+   985→   985→              │   images = row.data[mappings.carouselColumn]  // array column → [url1, url2, ...]
+   986→   986→              │
+   987→   987→              ├── Renders <ColorSwatches>
+   988→   988→              │   colors = row.data[mappings.colorColumn]     // [{name, hex}, ...]
+   989→   989→              │
+   990→   990→              ├── Renders <VariantSelector>
+   991→   991→              │   variants = row.data[mappings.variantColumn] // ["S", "M", "L", ...]
+   992→   992→              │
+   993→   993→              └── Renders <ActionButtons>
+   994→   994→                    channel = settings.whatsappNumber
+   995→   995→                    message = `Hi, I'm interested in ${row.data[mappings.title]}`
+   996→   996→```
+   997→   997→
+   998→   998→### 6.4 Inline Cell Edit Flow
+   999→   999→
+  1000→  1000→```
+  1001→  1001→User clicks cell in TableGrid
+  1002→  1002→        │
+  1003→  1003→        ▼
+  1004→  1004→[TableCell becomes editable]
+  1005→  1005→        │  User types new value
+  1006→  1006→        │  onBlur or Enter
+  1007→  1007→        ▼
+  1008→  1008→[data-store.markDirty(rowId, colId, newValue)]
+  1009→  1009→        │  Adds to dirtyCells map
+  1010→  1010→        │  Optimistically updates local row data
+  1011→  1011→        ▼
+  1012→  1012→[Debounced flushDirty() — 500ms after last edit]
+  1013→  1013→        │
+  1014→  1014→        ▼
+  1015→  1015→[PATCH /api/data-sources/[id]/rows/[rowId]]
+  1016→  1016→        │  { data: { [colId]: newValue } }
+  1017→  1017→        │
+  1018→  1018→        ▼
+  1019→  1019→[API merges into existing row.data JSON]
+  1020→  1020→        │  const existing = JSON.parse(row.data);
+  1021→  1021→        │  existing[colId] = newValue;
+  1022→  1022→        │  await db.row.update({ data: JSON.stringify(existing) });
+  1023→  1023→        ▼
+  1024→  1024→[Response confirms → remove from dirtyCells]
+  1025→  1025→```
+  1026→  1026→
+  1027→  1027→### 6.5 Array Column Resolution Flow
+  1028→  1028→
+  1029→  1029→```
+  1030→  1030→User creates ARRAY column "Image Gallery"
+  1031→  1031→        │  arrayChildIds: ["col_img1", "col_img2", "col_img3"]
+  1032→  1032→        │
+  1033→  1033→        ▼
+  1034→  1034→When rendering a row's "Image Gallery" column:
+  1035→  1035→        │
+  1036→  1036→        ▼
+  1037→  1037→[resolveArrayColumn(row, arrayColumn)]
+  1038→  1038→        │
+  1039→  1039→        const childIds = JSON.parse(arrayColumn.arrayChildIds);
+  1040→  1040→        const values = childIds.map(id => row.data[id]).filter(Boolean);
+  1041→  1041→        // values = ["https://img1.jpg", "https://img2.jpg", "https://img3.jpg"]
+  1042→  1042→        │
+  1043→  1043→        ▼
+  1044→  1044→[ImageCarousel receives values as slides]
+  1045→  1045→```
+  1046→  1046→
+  1047→  1047→### 6.6 Relation Resolution Flow
+  1048→  1048→
+  1049→  1049→```
+  1050→  1050→DataSource "Products" has column "categorie" of type RELATION
+  1051→  1051→        │  relationId → Relation {
+  1052→  1052→        │    sourceColumnId: "col_categorie",
+  1053→  1053→        │    sourceTableId: "ds_products",
+  1054→  1054→        │    targetTableId: "ds_categories",
+  1055→  1055→        │    type: MANY_TO_ONE
+  1056→  1056→        │  }
+  1057→  1057→        │
+  1058→  1058→        ▼
+  1059→  1059→When rendering a product row:
+  1060→  1060→        │
+  1061→  1061→        row.data["col_categorie"] = "row_xyz789"  // stores target row ID
+  1062→  1062→        │
+  1063→  1063→        ▼
+  1064→  1064→[resolveRelation(row, relationColumn)]
+  1065→  1065→        │
+  1066→  1066→        const targetRowId = row.data[relationColumn.id];
+  1067→  1067→        const targetRow = await db.row.findUnique({ where: { id: targetRowId } });
+  1068→  1068→        const targetColumns = await db.column.findMany({
+  1069→  1069→          where: { dataSourceId: relation.targetTableId }
+  1070→  1070→        });
+  1071→  1071→        const resolved = {};
+  1072→  1072→        for (const col of targetColumns) {
+  1073→  1073→          resolved[col.slug] = JSON.parse(targetRow.data)[col.id];
+  1074→  1074→        }
+  1075→  1075→        // resolved = { name: "Abayas", slug: "abayas", image: "..." }
+  1076→  1076→        │
+  1077→  1077→        ▼
+  1078→  1078→[Frontend receives _relations: { col_categorie: { name: "Abayas", ... } }]
+  1079→  1079→```
+  1080→  1080→
+  1081→  1081→---
+  1082→  1082→
+  1083→  1083→## 7. Key Implementation Strategies
+  1084→  1084→
+  1085→  1085→### 7.1 Dynamic Column Rendering Strategy
+  1086→  1086→
+  1087→  1087→Each `ColumnType` maps to a cell renderer and a cell editor:
+  1088→  1088→
+  1089→  1089→```typescript
+  1090→  1090→// src/lib/column-renderers.tsx
+  1091→  1091→const CellRenderer: Record<ColumnType, React.FC<CellRendererProps>> = {
+  1092→  1092→  TEXT:        ({ value }) => <span>{value}</span>,
+  1093→  1093→  LONG_TEXT:   ({ value }) => <p className="line-clamp-2">{value}</p>,
+  1094→  1094→  NUMBER:      ({ value }) => <span className="tabular-nums">{value}</span>,
+  1095→  1095→  CURRENCY:    ({ value, settings }) => <span>{formatCurrency(value, settings)}</span>,
+  1096→  1096→  IMAGE:       ({ value }) => value ? <img src={value} className="size-10 rounded object-cover" /> : <Placeholder />,
+  1097→  1097→  IMAGE_ARRAY: ({ value }) => <ImageThumbnailGrid images={JSON.parse(value || '[]')} />,
+  1098→  1098→  COLOR:       ({ value }) => {
+  1099→  1099→    const c = JSON.parse(value || '{}');
+  1100→  1100→    return <div className="flex items-center gap-2">
+  1101→  1101→      <div className="size-4 rounded-full" style={{ background: c.hex }} />
+  1102→  1102→      <span>{c.name}</span>
+  1103→  1103→    </div>;
+  1104→  1104→  },
+  1105→  1105→  BOOLEAN:     ({ value }) => <Checkbox checked={value === 'true'} />,
+  1106→  1106→  SELECT:      ({ value, column }) => <Badge>{value}</Badge>,
+  1107→  1107→  ARRAY:       ({ value, column, allColumns, row }) => {
+  1108→  1108→    // Compose from child columns
+  1109→  1109→    const childIds = JSON.parse(column.arrayChildIds || '[]');
+  1110→  1110→    const values = childIds.map(id => row.data[id]).filter(Boolean);
+  1111→  1111→    return <ImageThumbnailGrid images={values} />;
+  1112→  1112→  },
+  1113→  1113→  RELATION:    ({ value, column }) => {
+  1114→  1114→    // Show linked row's display name (fetched separately)
+  1115→  1115→    return <span className="text-primary underline">{value}</span>;
+  1116→  1116→  },
+  1117→  1117→  // ... etc
+  1118→  1118→};
+  1119→  1119→```
+  1120→  1120→
+  1121→  1121→### 7.2 Inline Table Editor (TanStack Table + shadcn)
+  1122→  1122→
+  1123→  1123→```typescript
+  1124→  1124→// src/components/builder/data/TableGrid.tsx
+  1125→  1125→// Uses @tanstack/react-table for virtual scrolling + column management
+  1126→  1126→// Each cell renders <CellEditor> based on ColumnType
+  1127→  1127→// Debounced save on blur/enter via data-store.markDirty + flushDirty
+  1128→  1128→
+  1129→  1129→const table = useReactTable({
+  1130→  1130→  data: rows.map(r => ({ ...JSON.parse(r.data), _id: r.id, _sortOrder: r.sortOrder })),
+  1131→  1131→  columns: columns.map(col => ({
+  1132→  1132→    id: col.id,
+  1133→  1133→    header: col.name,
+  1134→  1134→    accessorKey: col.id,
+  1135→  1135→    cell: ({ row, getValue }) => (
+  1136→  1136→      <CellEditor
+  1137→  1137→        column={col}
+  1138→  1138→        value={getValue()}
+  1139→  1139→        rowId={row.original._id}
+  1140→  1140→        onChange={(val) => markDirty(row.original._id, col.id, val)}
+  1141→  1141→      />
+  1142→  1142→    ),
+  1143→  1143→  })),
+  1144→  1144→});
+  1145→  1145→```
+  1146→  1146→
+  1147→  1147→### 7.3 CSV Import with Type Detection
+  1148→  1148→
+  1149→  1149→```typescript
+  1150→  1150→// src/app/api/data-sources/[id]/import/route.ts
+  1151→  1151→import Papa from 'papaparse';
+  1152→  1152→
+  1153→  1153→function detectColumnType(header: string, values: string[]): ColumnType {
+  1154→  1154→  const h = header.toLowerCase();
+  1155→  1155→  if (/image|img|photo|picture|pic/.test(h)) return 'IMAGE';
+  1156→  1156→  if (/price|prix|cost|montant|amount/.test(h)) return 'CURRENCY';
+  1157→  1157→  if (/color|couleur|colour/.test(h)) return 'COLOR';
+  1158→  1158→  if (/stock|quantity|quantité/.test(h)) return 'NUMBER';
+  1159→  1159→  if (/available|disponible|active/.test(h)) return 'BOOLEAN';
+  1160→  1160→  if (/description|desc|detail/.test(h)) return 'LONG_TEXT';
+  1161→  1161→
+  1162→  1162→  // Heuristic: if 80%+ values are numeric
+  1163→  1163→  const numericCount = values.filter(v => !isNaN(Number(v)) && v.trim() !== '').length;
+  1164→  1164→  if (numericCount / values.length > 0.8) return 'NUMBER';
+  1165→  1165→
+  1166→  1166→  return 'TEXT';
+  1167→  1167→}
+  1168→  1168→```
+  1169→  1169→
+  1170→  1170→### 7.4 Theme as CSS Variables (Runtime)
+  1171→  1171→
+  1172→  1172→```typescript
+  1173→  1173→// src/components/public/CatalogProvider.tsx
+  1174→  1174→function applyTheme(theme: Theme) {
+  1175→  1175→  const root = document.documentElement;
+  1176→  1176→  root.style.setProperty('--color-primary', theme.primaryColor);
+  1177→  1177→  root.style.setProperty('--color-secondary', theme.secondaryColor);
+  1178→  1178→  root.style.setProperty('--color-accent', theme.accentColor);
+  1179→  1179→  root.style.setProperty('--color-bg', theme.backgroundColor);
+  1180→  1180→  root.style.setProperty('--color-card', theme.cardBackground);
+  1181→  1181→  root.style.setProperty('--color-text', theme.textColor);
+  1182→  1182→  root.style.setProperty('--color-muted', theme.mutedColor);
+  1183→  1183→  root.style.setProperty('--font-heading', theme.fontFamily);
+  1184→  1184→  root.style.setProperty('--font-body', theme.bodyFont);
+  1185→  1185→  root.style.setProperty('--radius', theme.borderRadius);
+  1186→  1186→}
+  1187→  1187→```
+  1188→  1188→
+  1189→  1189→### 7.5 Column-to-Component Mapping Resolution
+  1190→  1190→
+  1191→  1191→This is the core rendering engine. Given a component's `mappings` JSON and a row's `data` JSON, resolve what to display:
+  1192→  1192→
+  1193→  1193→```typescript
+  1194→  1194→// src/lib/resolve-mappings.ts
+  1195→  1195→interface MappingConfig {
+  1196→  1196→  dataSourceId: string;
+  1197→  1197→  title?: string;        // column ID
+  1198→  1198→  subtitle?: string;     // column ID
+  1199→  1199→  description?: string;  // column ID
+  1200→  1200→  coverImage?: string;   // column ID
+  1201→  1201→  price?: string;        // column ID
+  1202→  1202→  carouselImages?: string;  // column ID (must be ARRAY or IMAGE_ARRAY type)
+  1203→  1203→  colorVariants?: string;   // column ID
+  1204→  1204→  sizeVariants?: string;    // column ID
+  1205→  1205→  filterBy?: string;        // column ID (for category filter)
+  1206→  1206→  sortBy?: string;          // column ID
+  1207→  1207→}
+  1208→  1208→
+  1209→  1209→function resolveCardData(mapping: MappingConfig, row: Row, columns: Column[]) {
+  1210→  1210→  const data = JSON.parse(row.data);
+  1211→  1211→  const colMap = Object.fromEntries(columns.map(c => [c.id, c]));
+  1212→  1212→
+  1213→  1213→  return {
+  1214→  1214→    id: row.id,
+  1215→  1215→    title: data[mapping.title ?? ''] ?? '',
+  1216→  1216→    subtitle: resolveValue(data, mapping.subtitle, colMap),
+  1217→  1217→    description: resolveValue(data, mapping.description, colMap),
+  1218→  1218→    coverImage: resolveValue(data, mapping.coverImage, colMap),
+  1219→  1219→    price: mapping.price ? {
+  1220→  1220→      value: Number(data[mapping.price] ?? 0),
+  1221→  1221→      currency: colMap[mapping.price]?.type === 'CURRENCY',
+  1222→  1222→    } : null,
+  1223→  1223→  };
+  1224→  1224→}
+  1225→  1225→
+  1226→  1226→function resolveDetailData(mapping: MappingConfig, row: Row, columns: Column[]) {
+  1227→  1227→  const data = JSON.parse(row.data);
+  1228→  1228→  const colMap = Object.fromEntries(columns.map(c => [c.id, c]));
+  1229→  1229→  const card = resolveCardData(mapping, row, columns);
+  1230→  1230→
+  1231→  1231→  // Resolve array columns
+  1232→  1232→  const carouselImages = mapping.carouselImages
+  1233→  1233→    ? resolveArrayColumn(data, mapping.carouselImages, colMap)
+  1234→  1234→    : [];
+  1235→  1235→
+  1236→  1236→  const colorVariants = mapping.colorVariants
+  1237→  1237→    ? JSON.parse(data[mapping.colorVariants] || '[]')
+  1238→  1238→    : [];
+  1239→  1239→
+  1240→  1240→  const sizeVariants = mapping.sizeVariants
+  1241→  1241→    ? JSON.parse(data[mapping.sizeVariants] || '[]')
+  1242→  1242→    : [];
+  1243→  1243→
+  1244→  1244→  return { ...card, carouselImages, colorVariants, sizeVariants };
+  1245→  1245→}
+  1246→  1246→
+  1247→  1247→function resolveArrayColumn(
+  1248→  1248→  data: Record<string, unknown>,
+  1249→  1249→  arrayColumnId: string,
+  1250→  1250→  colMap: Record<string, Column>
+  1251→  1251→): string[] {
+  1252→  1252→  const col = colMap[arrayColumnId];
+  1253→  1253→  if (!col) return [];
+  1254→  1254→
+  1255→  1255→  if (col.type === 'IMAGE_ARRAY') {
+  1256→  1256→    return JSON.parse((data[arrayColumnId] as string) || '[]');
+  1257→  1257→  }
+  1258→  1258→
+  1259→  1259→  if (col.type === 'ARRAY') {
+  1260→  1260→    const childIds: string[] = JSON.parse(col.arrayChildIds || '[]');
+  1261→  1261→    return childIds.map(id => data[id]).filter(Boolean) as string[];
+  1262→  1262→  }
+  1263→  1263→
+  1264→  1264→  return [];
+  1265→  1265→}
+  1266→  1266→```
+  1267→  1267→
+  1268→  1268→### 7.6 Public Catalog Server-Side Rendering Strategy
+  1269→  1269→
+  1270→  1270→For SEO and performance, the public catalog should use Next.js Server Components where possible:
+  1271→  1271→
+  1272→  1272→```typescript
+  1273→  1273→// src/app/c/[catalogSlug]/page.tsx (Server Component)
+  1274→  1274→export default async function CatalogPage({ params }: { params: { catalogSlug: string } }) {
+  1275→  1275→  const catalog = await getCatalogWithLayout(params.catalogSlug);
+  1276→  1276→  if (!catalog || !catalog.settings?.isPublished) notFound();
+  1277→  1277→
+  1278→  1278→  // Pre-fetch data for the home page's collection sections
+  1279→  1279→  const homePage = catalog.pages.find(p => p.isHome);
+  1280→  1280→  const collectionSections = homePage?.sections.filter(s => s.type === 'COLLECTION') ?? [];
+  1281→  1281→
+  1282→  1282→  const preloadedData: Record<string, Row[]> = {};
+  1283→  1283→  for (const section of collectionSections) {
+  1284→  1284→    const gridComponent = section.components.find(c => c.type === 'CARD_GRID');
+  1285→  1285→    if (gridComponent) {
+  1286→  1286→      const dsId = JSON.parse(gridComponent.mappings).dataSourceId;
+  1287→  1287→      preloadedData[dsId] = await db.row.findMany({
+  1288→  1288→        where: { dataSourceId: dsId },
+  1289→  1289→        take: 50,
+  1290→  1290→        orderBy: { sortOrder: 'asc' },
+  1291→  1291→      });
+  1292→  1292→    }
+  1293→  1293→  }
+  1294→  1294→
+  1295→  1295→  return (
+  1296→  1296→    <CatalogProvider catalog={catalog} preloadedData={preloadedData}>
+  1297→  1297→      <PageRenderer page={homePage} />
+  1298→  1298→    </CatalogProvider>
+  1299→  1299→  );
+  1300→  1300→}
+  1301→  1301→```
+  1302→  1302→
+  1303→  1303→### 7.7 Debounced Batch Save for Inline Editing
+  1304→  1304→
+  1305→  1305→```typescript
+  1306→  1306→// src/lib/stores/data-store.ts (excerpt)
+  1307→  1307→let flushTimeout: NodeJS.Timeout | null = null;
+  1308→  1308→
+  1309→  1309→markDirty: (rowId, colId, value) => {
+  1310→  1310→  set(state => {
+  1311→  1311→    const newDirty = new Map(state.dirtyCells);
+  1312→  1312→    newDirty.set(`${rowId}:${colId}`, value);
+  1313→  1313→
+  1314→  1314→    // Optimistic local update
+  1315→  1315→    const newRows = state.rows.map(r => {
+  1316→  1316→      if (r.id !== rowId) return r;
+  1317→  1317→      const data = JSON.parse(r.data);
+  1318→  1318→      data[colId] = value;
+  1319→  1319→      return { ...r, data: JSON.stringify(data) };
+  1320→  1320→    });
+  1321→  1321→
+  1322→  1322→    return { dirtyCells: newDirty, rows: newRows };
+  1323→  1323→  });
+  1324→  1324→
+  1325→  1325→  // Debounce flush
+  1326→  1326→  if (flushTimeout) clearTimeout(flushTimeout);
+  1327→  1327→  flushTimeout = setTimeout(() => get().flushDirty(), 500);
+  1328→  1328→},
+  1329→  1329→
+  1330→  1330→flushDirty: async () => {
+  1331→  1331→  const { dirtyCells, rows } = get();
+  1332→  1332→  if (dirtyCells.size === 0) return;
+  1333→  1333→
+  1334→  1334→  // Group by rowId
+  1335→  1335→  const byRow = new Map<string, Record<string, string>>();
+  1336→  1336→  for (const [key, value] of dirtyCells) {
+  1337→  1337→    const [rowId, colId] = key.split(':');
+  1338→  1338→    if (!byRow.has(rowId)) byRow.set(rowId, {});
+  1339→  1339→    byRow.get(rowId)![colId] = value;
+  1340→  1340→  }
+  1341→  1341→
+  1342→  1342→  // Batch PATCH each row
+  1343→  1343→  await Promise.all(
+  1344→  1344→    Array.from(byRow.entries()).map(([rowId, updates]) =>
+  1345→  1345→      fetch(`/api/data-sources/${get().activeDataSourceId}/rows/${rowId}`, {
+  1346→  1346→        method: 'PATCH',
+  1347→  1347→        headers: { 'Content-Type': 'application/json' },
+  1348→  1348→        body: JSON.stringify({ data: updates }),
+  1349→  1349→      })
+  1350→  1350→    )
+  1351→  1351→  );
+  1352→  1352→
+  1353→  1353→  set({ dirtyCells: new Map() });
+  1354→  1354→},
+  1355→  1355→```
+  1356→  1356→
+  1357→  1357→### 7.8 Relation Resolution on the API Side
+  1358→  1358→
+  1359→  1359→```typescript
+  1360→  1360→// src/app/api/public/[catalogSlug]/product/[rowId]/route.ts
+  1361→  1361→export async function GET(req: NextRequest, { params }: { params: { rowId: string } }) {
+  1362→  1362→  const row = await db.row.findUnique({ where: { id: params.rowId } });
+  1363→  1363→  if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  1364→  1364→
+  1365→  1365→  const data = JSON.parse(row.data);
+  1366→  1366→
+  1367→  1367→  // Resolve all RELATION columns
+  1368→  1368→  const columns = await db.column.findMany({
+  1369→  1369→    where: { dataSourceId: row.dataSourceId, type: 'RELATION' },
+  1370→  1370→    include: { relation: true },
+  1371→  1371→  });
+  1372→  1372→
+  1373→  1373→  const resolvedRelations: Record<string, any> = {};
+  1374→  1374→
+  1375→  1375→  for (const col of columns) {
+  1376→  1376→    if (!col.relation) continue;
+  1377→  1377→    const targetRowId = data[col.id];
+  1378→  1378→    if (!targetRowId) continue;
+  1379→  1379→
+  1380→  1380→    const targetRow = await db.row.findUnique({ where: { id: targetRowId } });
+  1381→  1381→    if (!targetRow) continue;
+  1382→  1382→
+  1383→  1383→    const targetColumns = await db.column.findMany({
+  1384→  1384→      where: { dataSourceId: col.relation.targetTableId },
+  1385→  1385→    });
+  1386→  1386→
+  1387→  1387→    const targetData = JSON.parse(targetRow.data);
+  1388→  1388→    const resolved: Record<string, any> = {};
+  1389→  1389→    for (const tc of targetColumns) {
+  1390→  1390→      resolved[tc.slug] = targetData[tc.id];
+  1391→  1391→    }
+  1392→  1392→    resolvedRelations[col.id] = resolved;
+  1393→  1393→  }
+  1394→  1394→
+  1395→  1395→  return NextResponse.json({
+  1396→  1396→    ...data,
+  1397→  1397→    _id: row.id,
+  1398→  1398→    _relations: resolvedRelations,
+  1399→  1399→  });
+  1400→  1400→}
+  1401→  1401→```
+  1402→  1402→
+  1403→  1403→---
+  1404→  1404→
+  1405→  1405→## 8. Migration Path from Current Codebase
+  1406→  1406→
+  1407→  1407→### Phase 1: Schema Migration (Week 1)
+  1408→  1408→
+  1409→  1409→The existing `Product`, `Category` tables remain functional while we add the new dynamic schema alongside them:
+  1410→  1410→
+  1411→  1411→1. **Add new models** to `schema.prisma` (all the models above)
+  1412→  1412→2. **Run `prisma db push`** — SQLite is additive, no data loss
+  1413→  1413→3. **Create migration script** (`scripts/migrate-to-dynamic.ts`) that:
+  1414→  1414→   - Creates a `DataSource` for "Products" and "Categories"
+  1415→  1415→   - Creates `Column` records matching existing Product/Category fields
+  1416→  1416→   - Migrates all Product rows into the `Row` table with JSON data
+  1417→  1417→   - Creates a `Relation` linking Products → Categories
+  1418→  1418→   - Creates default `Catalog`, `Page`, `Section`, `Component` records
+  1419→  1419→
+  1420→  1420→```typescript
+  1421→  1421→// scripts/migrate-to-dynamic.ts (pseudocode)
+  1422→  1422→async function migrate() {
+  1423→  1423→  // 1. Create DataSources
+  1424→  1424→  const productsDS = await db.dataSource.create({ data: { name: 'Products', slug: 'products' } });
+  1425→  1425→  const categoriesDS = await db.dataSource.create({ data: { name: 'Categories', slug: 'categories' } });
+  1426→  1426→
+  1427→  1427→  // 2. Create Columns for Products
+  1428→  1428→  const productColumns = [
+  1429→  1429→    { name: 'Nom du produit', slug: 'nom-produit', type: 'TEXT', required: true },
+  1430→  1430→    { name: 'Prix de vente', slug: 'prix-vente', type: 'CURRENCY', required: true },
+  1431→  1431→    { name: 'Description', slug: 'description', type: 'LONG_TEXT' },
+  1432→  1432→    { name: 'Couleurs', slug: 'couleurs', type: 'IMAGE_ARRAY' },  // Stored as JSON
+  1433→  1433→    { name: 'Tailles', slug: 'tailles', type: 'MULTI_SELECT' },
+  1434→  1434→    { name: 'Image principale', slug: 'image-principale', type: 'IMAGE' },
+  1435→  1435→    { name: 'Images carousel', slug: 'images-carousel', type: 'IMAGE_ARRAY' },
+  1436→  1436→    { name: 'Catégorie', slug: 'categorie', type: 'RELATION' },
+  1437→  1437→    { name: 'Stock', slug: 'stock', type: 'NUMBER' },
+  1438→  1438→    { name: 'Disponible', slug: 'disponible', type: 'BOOLEAN' },
+  1439→  1439→    { name: 'Vedette', slug: 'vedette', type: 'BOOLEAN' },
+  1440→  1440→  ];
+  1441→  1441→
+  1442→  1442→  const createdColumns = {};
+  1443→  1443→  for (const col of productColumns) {
+  1444→  1444→    createdColumns[col.slug] = await db.column.create({
+  1445→  1445→      data: { ...col, dataSourceId: productsDS.id }
+  1446→  1446→    });
+  1447→  1447→  }
+  1448→  1448→
+  1449→  1449→  // 3. Create Columns for Categories
+  1450→  1450→  const categoryColumns = [
+  1451→  1451→    { name: 'Nom', slug: 'nom', type: 'TEXT', required: true },
+  1452→  1452→    { name: 'Image', slug: 'image', type: 'IMAGE' },
+  1453→  1453→  ];
+  1454→  1454→
+  1455→  1455→  // 4. Migrate Category rows
+  1456→  1456→  const oldCategories = await db.category.findMany();
+  1457→  1457→  const categoryRowMap = {};
+  1458→  1458→  for (const cat of oldCategories) {
+  1459→  1459→    const row = await db.row.create({
+  1460→  1460→      data: {
+  1461→  1461→        dataSourceId: categoriesDS.id,
+  1462→  1462→        data: JSON.stringify({
+  1463→  1463→          [createdCatColumns['nom'].id]: cat.nom,
+  1464→  1464→          [createdCatColumns['image'].id]: '', // if exists
+  1465→  1465→        }),
+  1466→  1466→      }
+  1467→  1467→    });
+  1468→  1468→    categoryRowMap[cat.id] = row.id;
+  1469→  1469→  }
+  1470→  1470→
+  1471→  1471→  // 5. Create Relation
+  1472→  1472→  await db.relation.create({
+  1473→  1473→    data: {
+  1474→  1474→      name: 'Product → Category',
+  1475→  1475→      sourceColumnId: createdColumns['categorie'].id,
+  1476→  1476→      sourceTableId: productsDS.id,
+  1477→  1477→      targetTableId: categoriesDS.id,
+  1478→  1478→      type: 'MANY_TO_ONE',
+  1479→  1479→    }
+  1480→  1480→  });
+  1481→  1481→
+  1482→  1482→  // 6. Migrate Product rows
+  1483→  1483→  const oldProducts = await db.product.findMany();
+  1484→  1484→  for (const prod of oldProducts) {
+  1485→  1485→    await db.row.create({
+  1486→  1486→      data: {
+  1487→  1487→        dataSourceId: productsDS.id,
+  1488→  1488→        data: JSON.stringify({
+  1489→  1489→          [createdColumns['nom-produit'].id]: prod.nomProduit,
+  1490→  1490→          [createdColumns['prix-vente'].id]: prod.prixVente,
+  1491→  1491→          [createdColumns['description'].id]: prod.description,
+  1492→  1492→          [createdColumns['image-principale'].id]: prod.imagePrincipale,
+  1493→  1493→          [createdColumns['images-carousel'].id]: prod.imagesCarousel,
+  1494→  1494→          [createdColumns['couleurs'].id]: prod.couleurs,
+  1495→  1495→          [createdColumns['tailles'].id]: prod.tailles,
+  1496→  1496→          [createdColumns['categorie'].id]: categoryRowMap[prod.categorieId] || null,
+  1497→  1497→          [createdColumns['stock'].id]: prod.stock,
+  1498→  1498→          [createdColumns['disponible'].id]: prod.disponible,
+  1499→  1499→          [createdColumns['vedette'].id]: prod.featured,
+  1500→  1500→        }),
+  1501→  1501→      }
+  1502→  1502→    });
+  1503→  1503→  }
+  1504→  1504→
+  1505→  1505→  // 7. Create default Catalog with Layout
+  1506→  1506→  const catalog = await db.catalog.create({ data: { name: 'Abaya Chic Collection' } });
+  1507→  1507→  // ... create Page, Sections, Components with mappings referencing column IDs
+  1508→  1508→}
+  1509→  1509→```
+  1510→  1510→
+  1511→  1511→### Phase 2: Builder UI (Week 2-3)
+  1512→  1512→
+  1513→  1513→1. Create the three-pillar sidebar layout
+  1514→  1514→2. Build Data pillar: DataSourceManager + DataSourceEditor (table grid)
+  1515→  1515→3. Build Layout pillar: PageManager + PageEditor + ComponentConfig
+  1516→  1516→4. Build Settings pillar: All settings forms
+  1517→  1517→5. Build the Preview pane
+  1518→  1518→
+  1519→  1519→### Phase 3: Public Renderer (Week 3-4)
+  1520→  1520→
+  1521→  1521→1. Create `/c/[catalogSlug]` route
+  1522→  1522→2. Build CatalogProvider + ThemeProvider + LanguageProvider
+  1523→  1523→3. Build SectionRenderer with all section types
+  1524→  1524→4. Build CollectionSection with dynamic column mapping resolution
+  1525→  1525→5. Build DetailSection with carousel, color swatches, variant selector
+  1526→  1526→6. Add search, filter, sharing, WhatsApp integration
+  1527→  1527→
+  1528→  1528→### Phase 4: Polish & Remove Legacy (Week 4)
+  1529→  1529→
+  1530→  1530→1. Remove old `Product`/`Category` models from schema
+  1531→  1531→2. Remove old admin/gallery components
+  1532→  1532→3. Redirect `/` → `/c/default-catalog` or `/builder`
+  1533→  1533→4. Add image upload with Sharp processing
+  1534→  1534→5. Performance optimization (virtual scrolling, image lazy loading)
+  1535→  1535→
+  1536→  1536→---
+  1537→  1537→
+  1538→  1538→## Appendix A: Directory Structure
+  1539→  1539→
+  1540→  1540→```
+  1541→  1541→src/
+  1542→  1542→├── app/
+  1543→  1543→│   ├── api/
+  1544→  1544→│   │   ├── auth/route.ts
+  1545→  1545→│   │   ├── data-sources/
+  1546→  1546→│   │   │   ├── route.ts
+  1547→  1547→│   │   │   ├── [id]/
+  1548→  1548→│   │   │   │   ├── route.ts
+  1549→  1549→│   │   │   │   ├── columns/
+  1550→  1550→│   │   │   │   │   ├── route.ts
+  1551→  1551→│   │   │   │   │   └── [columnId]/route.ts
+  1552→  1552→│   │   │   │   ├── rows/
+  1553→  1553→│   │   │   │   │   ├── route.ts
+  1554→  1554→│   │   │   │   │   └── [rowId]/route.ts
+  1555→  1555→│   │   │   │   ├── import/route.ts
+  1556→  1556→│   │   │   │   ├── export/route.ts
+  1557→  1557→│   │   │   │   └── relations/
+  1558→  1558→│   │   │   │       ├── route.ts
+  1559→  1559→│   │   │   │       └── [relationId]/route.ts
+  1560→  1560→│   │   ├── catalogs/
+  1561→  1561→│   │   │   ├── route.ts
+  1562→  1562→│   │   │   ├── [catalogId]/
+  1563→  1563→│   │   │   │   ├── route.ts
+  1564→  1564→│   │   │   │   ├── pages/
+  1565→  1565→│   │   │   │   │   ├── route.ts
+  1566→  1566→│   │   │   │   │   └── [pageId]/
+  1567→  1567→│   │   │   │   │       ├── route.ts
+  1568→  1568→│   │   │   │   │       └── sections/
+  1569→  1569→│   │   │   │   │           ├── route.ts
+  1570→  1570→│   │   │   │   │           └── [sectionId]/
+  1571→  1571→│   │   │   │   │               ├── route.ts
+  1572→  1572→│   │   │   │   │               └── components/
+  1573→  1573→│   │   │   │   │                   ├── route.ts
+  1574→  1574→│   │   │   │   │                   └── [componentId]/route.ts
+  1575→  1575→│   │   │   │   ├── settings/route.ts
+  1576→  1576→│   │   │   │   ├── theme/route.ts
+  1577→  1577→│   │   │   │   ├── publish/route.ts
+  1578→  1578→│   │   │   │   └── share/route.ts
+  1579→  1579→│   │   ├── public/
+  1580→  1580→│   │   │   └── [catalogSlug]/
+  1581→  1581→│   │   │       ├── route.ts
+  1582→  1582→│   │   │       ├── data/[dataSourceSlug]/route.ts
+  1583→  1583→│   │   │       └── product/[rowId]/route.ts
+  1584→  1584→│   │   └── upload/route.ts
+  1585→  1585→│   │
+  1586→  1586→│   ├── builder/                    # Builder pages (protected)
+  1587→  1587→│   │   ├── layout.tsx
+  1588→  1588→│   │   └── [catalogId]/
+  1589→  1589→│   │       └── page.tsx
+  1590→  1590→│   │
+  1591→  1591→│   ├── c/                          # Public catalog (SSR)
+  1592→  1592→│   │   └── [catalogSlug]/
+  1593→  1593→│   │       ├── page.tsx
+  1594→  1594→│   │       └── product/[rowId]/page.tsx
+  1595→  1595→│   │
+  1596→  1596→│   ├── layout.tsx
+  1597→  1597→│   └── globals.css
+  1598→  1598→│
+  1599→  1599→├── components/
+  1600→  1600→│   ├── builder/                    # Builder (admin) components
+  1601→  1601→│   │   ├── BuilderLayout.tsx
+  1602→  1602→│   │   ├── BuilderSidebar.tsx
+  1603→  1603→│   │   ├── BuilderMain.tsx
+  1604→  1604→│   │   ├── BuilderPreview.tsx
+  1605→  1605→│   │   ├── data/                   # Pillar 1 components
+  1606→  1606→│   │   │   ├── DataSourceManager.tsx
+  1607→  1607→│   │   │   ├── DataSourceEditor.tsx
+  1608→  1608→│   │   │   ├── TableGrid.tsx
+  1609→  1609→│   │   │   ├── CellEditor.tsx
+  1610→  1610→│   │   │   ├── AddColumnDropdown.tsx
+  1611→  1611→│   │   │   ├── ImportCSVModal.tsx
+  1612→  1612→│   │   │   └── RelationPanel.tsx
+  1613→  1613→│   │   ├── layout/                 # Pillar 2 components
+  1614→  1614→│   │   │   ├── PageManager.tsx
+  1615→  1615→│   │   │   ├── PageEditor.tsx
+  1616→  1616→│   │   │   ├── SectionList.tsx
+  1617→  1617→│   │   │   ├── SectionBlock.tsx
+  1618→  1618→│   │   │   ├── ComponentConfig.tsx
+  1619→  1619→│   │   │   ├── ComponentPreview.tsx
+  1620→  1620→│   │   │   └── AddSectionMenu.tsx
+  1621→  1621→│   │   └── settings/               # Pillar 3 components
+  1622→  1622→│   │       ├── LanguageSettings.tsx
+  1623→  1623→│   │       ├── AdminAccessSettings.tsx
+  1624→  1624→│   │       ├── ThemeEditor.tsx
+  1625→  1625→│   │       ├── PublicationControls.tsx
+  1626→  1626→│   │       ├── SharingSettings.tsx
+  1627→  1627→│   │       └── ConversionLinks.tsx
+  1628→  1628→│   │
+  1629→  1629→│   ├── public/                     # Public catalog renderer components
+  1630→  1630→│   │   ├── CatalogProvider.tsx
+  1631→  1631→│   │   ├── ThemeProvider.tsx
+  1632→  1632→│   │   ├── LanguageProvider.tsx
+  1633→  1633→│   │   ├── CatalogHeader.tsx
+  1634→  1634→│   │   ├── CatalogFooter.tsx
+  1635→  1635→│   │   ├── PageRenderer.tsx
+  1636→  1636→│   │   ├── SectionRenderer.tsx
+  1637→  1637→│   │   ├── sections/
+  1638→  1638→│   │   │   ├── HeroSection.tsx
+  1639→  1639→│   │   │   ├── CollectionSection.tsx
+  1640→  1640→│   │   │   ├── DetailSection.tsx
+  1641→  1641→│   │   │   ├── RichTextSection.tsx
+  1642→  1642→│   │   │   └── ImageBannerSection.tsx
+  1643→  1643→│   │   ├── ProductCard.tsx
+  1644→  1644→│   │   ├── ImageCarousel.tsx
+  1645→  1645→│   │   ├── ColorSwatches.tsx
+  1646→  1646→│   │   ├── VariantSelector.tsx
+  1647→  1647→│   │   ├── ActionButtons.tsx
+  1648→  1648→│   │   └── ImageZoom.tsx
+  1649→  1649→│   │
+  1650→  1650→│   └── ui/                         # shadcn/ui (unchanged)
+  1651→  1651→│
+  1652→  1652→├── lib/
+  1653→  1653→│   ├── db.ts                       # Prisma client singleton
+  1654→  1654→│   ├── utils.ts                    # cn() etc.
+  1655→  1655→│   ├── constants.ts
+  1656→  1656→│   ├── resolve-mappings.ts         # Column→UI resolution engine
+  1657→  1657→│   ├── column-renderers.tsx        # CellRenderer per ColumnType
+  1658→  1658→│   ├── csv-parser.ts               # PapaParse wrapper + type detection
+  1659→  1659→│   ├── format.ts                   # Currency, date formatters
+  1660→  1660→│   ├── i18n/                       # Internationalization
+  1661→  1661→│   │   ├── fr.ts
+  1662→  1662→│   │   ├── en.ts
+  1663→  1663→│   │   └── ar.ts
+  1664→  1664→│   └── stores/
+  1665→  1665→│       ├── builder-store.ts
+  1666→  1666→│       ├── data-store.ts
+  1667→  1667→│       ├── layout-store.ts
+  1668→  1668→│       ├── settings-store.ts
+  1669→  1669→│       ├── catalog-store.ts
+  1670→  1670→│       └── index.ts
+  1671→  1671→│
+  1672→  1672→└── types/
+  1673→  1673→    ├── index.ts                    # Shared types
+  1674→  1674→    ├── builder.ts                  # Builder-specific types
+  1675→  1675→    └── catalog.ts                  # Public catalog types
+  1676→  1676→```
+  1677→  1677→
+  1678→  1678→## Appendix B: Dependencies to Add
+  1679→  1679→
+  1680→  1680→```json
+  1681→  1681→{
+  1682→  1682→  "papaparse": "^5.4.1",        // CSV parsing
+  1683→  1683→  "@types/papaparse": "^5.3.14", // CSV types
+  1684→  1684→  "bcryptjs": "^2.4.3",          // Password hashing
+  1685→  1685→  "@types/bcryptjs": "^2.4.6",
+  1686→  1686→  "nanoid": "^5.0.7",            // Short IDs for slugs
+  1687→  1687→  "zod": "^4.0.2"                // Already present — for API validation
+  1688→  1688→}
+  1689→  1689→```
+  1690→  1690→
+  1691→  1691→## Appendix C: Key Type Definitions
+  1692→  1692→
+  1693→  1693→```typescript
+  1694→  1694→// src/types/builder.ts
+  1695→  1695→
+  1696→  1696→export interface DataSource {
+  1697→  1697→  id: string;
+  1698→  1698→  name: string;
+  1699→  1699→  slug: string;
+  1700→  1700→  icon: string;
+  1701→  1701→  color: string;
+  1702→  1702→  sortOrder: number;
+  1703→  1703→  columnCount?: number;
+  1704→  1704→  rowCount?: number;
+  1705→  1705→}
+  1706→  1706→
+  1707→  1707→export interface Column {
+  1708→  1708→  id: string;
+  1709→  1709→  dataSourceId: string;
+  1710→  1710→  name: string;
+  1711→  1711→  slug: string;
+  1712→  1712→  type: ColumnType;
+  1713→  1713→  sortOrder: number;
+  1714→  1714→  required: boolean;
+  1715→  1715→  visible: boolean;
+  1716→  1716→  defaultValue: string | null;
+  1717→  1717→  arrayChildIds: string | null;   // JSON array of column IDs
+  1718→  1718→  relationId: string | null;
+  1719→  1719→}
+  1720→  1720→
+  1721→  1721→export interface Row {
+  1722→  1722→  id: string;
+  1723→  1723→  dataSourceId: string;
+  1724→  1724→  data: Record<string, any>;     // Parsed from JSON
+  1725→  1725→  sortOrder: number;
+  1726→  1726→}
+  1727→  1727→
+  1728→  1728→export interface Relation {
+  1729→  1729→  id: string;
+  1730→  1730→  name: string;
+  1731→  1731→  sourceColumnId: string;
+  1732→  1732→  sourceTableId: string;
+  1733→  1733→  targetTableId: string;
+  1734→  1734→  type: 'MANY_TO_ONE' | 'ONE_TO_MANY' | 'MANY_TO_MANY';
+  1735→  1735→}
+  1736→  1736→
+  1737→  1737→export interface Section {
+  1738→  1738→  id: string;
+  1739→  1739→  pageId: string;
+  1740→  1740→  type: SectionType;
+  1741→  1741→  config: Record<string, any>;
+  1742→  1742→  sortOrder: number;
+  1743→  1743→  visible: boolean;
+  1744→  1744→  components: Component[];
+  1745→  1745→}
+  1746→  1746→
+  1747→  1747→export interface Component {
+  1748→  1748→  id: string;
+  1749→  1749→  sectionId: string;
+  1750→  1750→  type: ComponentType;
+  1751→  1751→  mappings: ComponentMappings;
+  1752→  1752→  style: Record<string, any>;
+  1753→  1753→  sortOrder: number;
+  1754→  1754→}
+  1755→  1755→
+  1756→  1756→// The mapping shape varies by component type
+  1757→  1757→export interface CollectionMappings {
+  1758→  1758→  dataSourceId: string;
+  1759→  1759→  title?: string;
+  1760→  1760→  subtitle?: string;
+  1761→  1761→  description?: string;
+  1762→  1762→  coverImage?: string;
+  1763→  1763→  price?: string;
+  1764→  1764→  filterBy?: string;
+  1765→  1765→  sortBy?: string;
+  1766→  1766→  sortOrder?: 'asc' | 'desc';
+  1767→  1767→}
+  1768→  1768→
+  1769→  1769→export interface DetailMappings {
+  1770→  1770→  carouselImages?: string;    // Array column ID
+  1771→  1771→  colorVariants?: string;     // Column ID
+  1772→  1772→  sizeVariants?: string;      // Column ID
+  1773→  1773→  extraFields?: Array<{
+  1774→  1774→    label: string;
+  1775→  1775→    columnId: string;
+  1776→  1776→  }>;
+  1777→  1777→  actionChannel?: 'whatsapp' | 'messenger' | 'email' | 'link';
+  1778→  1778→}
+  1779→  1779→```
+  1780→  1780→
