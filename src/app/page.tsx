@@ -1,31 +1,19 @@
-'use client'
+'use client';
+
+import OrdersPillar from '@/components/orders/OrdersPillar';
 
 export default function Home() {
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '100vh',
-      gap: '2rem',
-      padding: '1rem'
-    }}>
-      <div style={{
-        position: 'relative',
-        width: '6rem',
-        height: '6rem'
-      }}>
-        <img
-          src="/logo.svg"
-          alt="Z.ai Logo"
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'contain'
-          }}
-        />
+    <main className="min-h-screen flex flex-col">
+      <div className="flex-1 w-full max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <OrdersPillar />
       </div>
-    </div>
-  )
+      <footer className="border-t py-4 mt-auto">
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between text-xs text-muted-foreground">
+          <span>Abaya Collection — Admin</span>
+          <span>V4.1.3</span>
+        </div>
+      </footer>
+    </main>
+  );
 }
