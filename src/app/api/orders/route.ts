@@ -53,10 +53,12 @@ export async function GET(req: NextRequest) {
       db.order.count({ where }),
     ]);
 
-    // Compute CA (total revenue) — productPrice is total price (unit×qty), NOT multiplied again
+    // Compute CA (total revenue)
+    // productPrice = UNIT price → must multiply by productQuantity to get line total
+    // FX30 root cause: productPrice stores unit price, multiplying by qty gives the real total
     const ca = orders.reduce((sum, o) => {
-      const num = parseFloat(o.productPrice) || 0;
-      return sum + num; // FX30 fix: NO multiplication by productQuantity
+      const unitPrice = parseFloat(o.productPrice) || 0;
+      return sum + (unitPrice * (o.productQuantity || 1));
     }, 0);
 
     return NextResponse.json({
