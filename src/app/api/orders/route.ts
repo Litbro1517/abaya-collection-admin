@@ -36,9 +36,15 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
+  // TODO(DEBT-2): reinforce pagination guard — parseInt returns NaN on invalid
+  // input (e.g. ?page=abc), which currently propagates as NaN into skip/take.
+  // Add Number.isFinite() checks and explicit fallback to defaults.
   const page = Math.max(0, parseInt(searchParams.get('page') || '0', 10));
   const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '10', 10)));
   const status = searchParams.get('status') || '';
+  // TODO(DEBT-3): add a 200-char length cap on `search` to prevent oversized
+  // LIKE patterns (DoS mitigation). Currently unbounded — a 1MB search string
+  // would still be processed. Enforce: search.slice(0, 200) before building q.
   const search = searchParams.get('search') || '';
   const view = searchParams.get('view') || 'active'; // 'active' | 'archived' | 'all'
   const skip = page * limit;
@@ -68,6 +74,10 @@ export async function GET(req: NextRequest) {
     if (search.trim()) {
       const escaped = search.trim().replace(/[%_\\]/g, '\\$&');
       const q = `%${escaped}%`;
+      // TODO(DEBT-1): the datetime("createdAt"/1000, 'unixepoch') call below
+      // is SQLite-specific (SQLite stores DateTime as epoch-ms int). On
+      // PostgreSQL, replace it with CAST("createdAt" AS TEXT) which yields
+      // ISO 8601 directly. See PROJECT_MAP.md → Dette Technique à traiter.
       conditions.push(Prisma.sql`(
         LOWER("customerName")    LIKE LOWER(${q}) ESCAPE '\\'
         OR LOWER("customerPhone")  LIKE LOWER(${q}) ESCAPE '\\'

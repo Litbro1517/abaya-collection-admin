@@ -28,7 +28,7 @@
 
 ### V4.1.5 — Recherche robuste cross-DB (correctif V4.1.4)
 
-**Statut : 🔧 EN COURS — branche `fix/search-robust-v4.1.5`**
+**Statut : ✅ DÉPLOYÉ (main) — fusionné le 18/07/2026**
 
 | ID | Module | Correction | Fichier |
 |---|---|---|---|
@@ -92,3 +92,15 @@ src/
 - **CA** : `sum(productPrice × productQuantity)` — productPrice est un prix unitaire
 - **Édition** : Staged (pas de sauvegarde immédiate) — validation via bouton "Enregistrer" global
 - **Recherche** : 11 champs (V4.1.5) — nom, téléphone, ville, adresse, produit, couleur, taille, prix (texte), quantité (numérique), statut, date de création (date). Insensible à la casse, cross-DB, via `$queryRaw` + `LOWER()` + `CAST`/`datetime()`.
+
+## Dette Technique à traiter
+
+Section ouverte le 18/07/2026 après fusion de V4.1.5. Items à traiter dans une prochaine itération (non bloquants pour la production actuelle).
+
+| ID | Priorité | Module | Description | Fichier / Localisation |
+|---|---|---|---|---|
+| `DEBT-1` | Moyenne | Recherche | **TODO — Migration PostgreSQL de `datetime()`** : la fonction `datetime("createdAt"/1000, 'unixepoch')` est SQLite-spécifique. Prisma stocke les `DateTime` en epoch-ms sous SQLite, d'où la division par 1000 et le format `unixepoch`. Lors d'une migration vers PostgreSQL, `CAST("createdAt" AS TEXT)` retourne directement une chaîne ISO 8601 — il faudra remplacer cette seule ligne du `WHERE`. Marqueur `TODO(DEBT-1)` laissé en commentaire inline dans le code. | `src/app/api/orders/route.ts` — clause `datetime(...)` dans le `where.OR` |
+| `DEBT-2` | Haute | Pagination | **TODO — Renforcement du guard de pagination** : les appels `parseInt(searchParams.get('page') ...)` et `parseInt(searchParams.get('limit') ...)` retournent `NaN` sur une entrée invalide (ex. `?page=abc`). Actuellement, `NaN` se propage dans `skip`/`take` et peut produire un comportement imprévisible. Ajouter des vérifications `Number.isFinite()` avec repli explicite sur les valeurs par défaut (`page=0`, `limit=10`). Marqueur `TODO(DEBT-2)` laissé en commentaire inline. | `src/app/api/orders/route.ts` — lignes de parsing `page` / `limit` |
+| `DEBT-3` | Haute | Recherche | **TODO — Limite de longueur (200 caractères) sur le paramètre `search`** : actuellement `search` est non borné. Une chaîne très longue (ex. 1 Mo) serait quand même échappée puis injectée dans 11 clauses `LIKE` via `$queryRaw`, ce qui peut dégrader les performances (vecteur de DoS léger). Ajouter `search.slice(0, 200)` avant la construction du pattern `q`. Marqueur `TODO(DEBT-3)` laissé en commentaire inline. | `src/app/api/orders/route.ts` — ligne de récupération du paramètre `search` |
+
+**Note** : ces 3 items sont référencés dans le code par des commentaires `// TODO(DEBT-N)` pour faciliter leur localisation lors d'une future passe de résolution.
