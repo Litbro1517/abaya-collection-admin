@@ -25,18 +25,21 @@ export async function GET(req: NextRequest) {
     where.status = status;
   }
 
-  // Search filter — searches across 7 fields (including customerAddress + productPrice)
+  // Search filter — searches across 8 fields (case-insensitive)
+  // FX-CaseSens: mode: 'insensitive' forces ILIKE on PostgreSQL;
+  //   on SQLite, Prisma silently falls back to LIKE (case-sensitive),
+  //   which is acceptable since production runs on PostgreSQL.
   if (search.trim()) {
     const q = search.trim();
     where.OR = [
-      { customerName: { contains: q } },
-      { customerPhone: { contains: q } },
-      { customerCity: { contains: q } },
-      { customerAddress: { contains: q } },
-      { productName: { contains: q } },
-      { productColor: { contains: q } },
-      { productSize: { contains: q } },
-      { productPrice: { contains: q } },
+      { customerName: { contains: q, mode: 'insensitive' } },
+      { customerPhone: { contains: q, mode: 'insensitive' } },
+      { customerCity: { contains: q, mode: 'insensitive' } },
+      { customerAddress: { contains: q, mode: 'insensitive' } },
+      { productName: { contains: q, mode: 'insensitive' } },
+      { productColor: { contains: q, mode: 'insensitive' } },
+      { productSize: { contains: q, mode: 'insensitive' } },
+      { productPrice: { contains: q, mode: 'insensitive' } },
     ];
   }
 

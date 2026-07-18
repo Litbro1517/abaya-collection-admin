@@ -16,6 +16,14 @@
 | FX-Quality | DataQualityIcon | Étendu à `productName`, `productColor`, `productSize`, `productImage`, `productPrice`. | `OrdersTable.tsx` L76-115 |
 | FX-Checkbox | Sélection | `onClick={e => e.stopPropagation()}` sur `TableCell` (pas sur `onCheckedChange`). | `OrdersTable.tsx` L310-315 |
 
+### V4.1.4 — Correction sensibilité à la casse (Recherche)
+
+**Statut : 🔧 EN COURS — branche `fix/search-case-sensitivity`**
+
+| ID | Module | Correction | Fichier |
+|---|---|---|---|
+| FX-CaseSens | Recherche | Ajout de `mode: 'insensitive'` sur les 8 clauses `contains` du `where.OR`. Force `ILIKE` sur PostgreSQL pour une recherche insensible à la casse. | `route.ts` L28-44 |
+
 ## Architecture
 
 ```
